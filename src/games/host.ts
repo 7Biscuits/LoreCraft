@@ -88,7 +88,7 @@ export class AuthoredGameHost {
     this.startPromise = engineInit(
       () => this.init(),
       () => {
-        this.guard(() => this.game.update({ deltaSeconds: timeDelta, movement: this.input ?? keyDirection(), restart: keyWasPressed('KeyR') }));
+        this.guard(() => this.game.update({ deltaSeconds: timeDelta, movement: this.input ?? keyDirection(), restart: keyWasPressed('KeyR'), throwRock: keyWasPressed('KeyF') }));
       },
       undefined,
       () => this.guard(() => this.game.render()),

@@ -5,6 +5,7 @@ import {
   drawRect,
   drawText,
   drawTextScreen,
+  keyWasPressed,
   mainCanvasSize,
   setCameraPos,
   setCanvasClearColor,
@@ -87,6 +88,16 @@ interface SquashedEnemy {
   timer: number;
 }
 
+interface RockProjectile {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+  rot: number;
+  bounces: number;
+}
+
 /**
  * Super Mario Bros 2D Platformer (World 1-1).
  * Features:
@@ -118,6 +129,8 @@ export class SuperMarioGame implements GameModule {
   private readonly floatingScores: FloatingScore[] = [];
   private readonly squashedEnemies: SquashedEnemy[] = [];
   private readonly enemyDirections = new Map<string, number>();
+  private readonly rocks: RockProjectile[] = [];
+  private throwCooldown = 0;
 
   constructor(id = 'super-mario', title = 'Super Mario Bros (World 1-1)') {
     this.id = id;
@@ -174,6 +187,14 @@ export class SuperMarioGame implements GameModule {
       ? pData.data.properties.speed
       : marioConfig.playerSpeed;
 
+    // Rock projectile throwing (press "f")
+    this.throwCooldown = Math.max(0, this.throwCooldown - dt);
+    const throwRequested = Boolean(frame.throwRock || (typeof keyWasPressed === 'function' && keyWasPressed('KeyF')));
+    if (throwRequested && this.throwCooldown <= 0) {
+      this.throwRock(player);
+      this.throwCooldown = 0.25;
+    }
+
     // Horizontal control with acceleration & friction
     const inputX = Math.max(-1, Math.min(1, frame.movement.x));
     if (inputX !== 0) {
@@ -210,6 +231,9 @@ export class SuperMarioGame implements GameModule {
     const obstacles = this.entities('obstacle');
     this.movePlayerX(player, this.vx * dt, obstacles);
     this.movePlayerY(player, this.vy * dt, obstacles);
+
+    // Update rock projectiles
+    this.updateRocks(dt, obstacles);
 
     // Pit death
     if (player.pos.y < marioConfig.pitDeathY) {
@@ -255,7 +279,10 @@ export class SuperMarioGame implements GameModule {
     // 2. Draw VFX (Popping coins, floating scores, squashed enemies)
     this.renderVfx();
 
-    // 3. Draw HUD (Screen space)
+    // 3. Draw Rock Projectiles
+    this.renderRocks();
+
+    // 4. Draw HUD (Screen space)
     this.renderHud(center);
   }
 
@@ -279,6 +306,8 @@ export class SuperMarioGame implements GameModule {
     this.floatingScores.length = 0;
     this.squashedEnemies.length = 0;
     this.enemyDirections.clear();
+    this.rocks.length = 0;
+    this.throwCooldown = 0;
     this.context.setScore(0);
 
     // Create player and hook custom Mario renderer
@@ -674,6 +703,129 @@ export class SuperMarioGame implements GameModule {
     }
   }
 
+  private throwRock(player: EngineObject): void {
+    const dir = this.facingRight ? 1 : -1;
+    this.rocks.push({
+      x: player.pos.x + dir * 0.5,
+      y: player.pos.y + 0.1,
+      vx: dir * 12,
+      vy: 4,
+      radius: 0.22,
+      rot: 0,
+      bounces: 0,
+    });
+    playSfx('bump');
+  }
+
+  private updateRocks(dt: number, obstacles: ManagedEntity[]): void {
+    for (let i = this.rocks.length - 1; i >= 0; i--) {
+      const rock = this.rocks[i];
+      let destroyed = false;
+
+      // Apply gravity
+      rock.vy += marioConfig.gravity * dt;
+      if (rock.vy < marioConfig.terminalVelocity) {
+        rock.vy = marioConfig.terminalVelocity;
+      }
+
+      // Advance horizontal position
+      rock.x += rock.vx * dt;
+      rock.rot += rock.vx * dt * 4;
+
+      // Horizontal obstacle collisions
+      for (const obs of obstacles) {
+        if (obs.id === 'flagpole') continue;
+        const wall = obs.object as EngineObject;
+        const halfW = wall.size.x / 2 + rock.radius;
+        const halfH = wall.size.y / 2 + rock.radius;
+        if (Math.abs(rock.x - wall.pos.x) < halfW && Math.abs(rock.y - wall.pos.y) < halfH - 0.08) {
+          destroyed = true;
+          playSfx('bump');
+          break;
+        }
+      }
+      if (destroyed) {
+        this.rocks.splice(i, 1);
+        continue;
+      }
+
+      // Advance vertical position
+      rock.y += rock.vy * dt;
+
+      // Vertical obstacle collisions
+      for (const obs of obstacles) {
+        if (obs.id === 'flagpole') continue;
+        const wall = obs.object as EngineObject;
+        const halfW = wall.size.x / 2 + rock.radius;
+        const halfH = wall.size.y / 2 + rock.radius;
+        if (Math.abs(rock.x - wall.pos.x) < halfW && Math.abs(rock.y - wall.pos.y) < halfH) {
+          if (rock.vy < 0) {
+            // Landed on surface -> bounce!
+            rock.y = wall.pos.y + wall.size.y / 2 + rock.radius;
+            rock.bounces++;
+            if (rock.bounces > 4) {
+              destroyed = true;
+            } else {
+              rock.vy = 5;
+              playSfx('bump');
+            }
+          } else {
+            destroyed = true;
+            playSfx('bump');
+          }
+          break;
+        }
+      }
+      if (destroyed) {
+        this.rocks.splice(i, 1);
+        continue;
+      }
+
+      // Check collision with Goomba enemies
+      for (const enemy of this.entities('enemy')) {
+        const enemyObj = enemy.object as EngineObject;
+        const hitX = enemyObj.size.x / 2 + rock.radius;
+        const hitY = enemyObj.size.y / 2 + rock.radius;
+        if (Math.abs(rock.x - enemyObj.pos.x) < hitX && Math.abs(rock.y - enemyObj.pos.y) < hitY) {
+          this.context?.runtime.deleteEntity(enemy.id);
+          this.addScore(200, enemyObj.pos.x, enemyObj.pos.y + 0.6);
+          this.squashedEnemies.push({ x: enemyObj.pos.x, y: enemyObj.pos.y - 0.2, timer: 0.45 });
+          playSfx('stomp');
+          destroyed = true;
+          break;
+        }
+      }
+      if (destroyed) {
+        this.rocks.splice(i, 1);
+        continue;
+      }
+
+      // Out of bounds / pit
+      if (rock.y < marioConfig.pitDeathY || Math.abs(rock.x - this.cameraX) > 22) {
+        this.rocks.splice(i, 1);
+      }
+    }
+  }
+
+  private renderRocks(): void {
+    for (const rock of this.rocks) {
+      const pos = vec2(rock.x, rock.y);
+      const cosR = Math.cos(rock.rot);
+      const sinR = Math.sin(rock.rot);
+      drawCircle(pos, rock.radius, colors.stoneDark);
+      drawCircle(
+        pos.add(vec2(-0.06 * cosR - 0.04 * sinR, -0.06 * sinR + 0.04 * cosR)),
+        rock.radius * 0.65,
+        colors.stoneStep,
+      );
+      drawCircle(
+        pos.add(vec2(0.08 * cosR - 0.05 * sinR, 0.08 * sinR + 0.05 * cosR)),
+        rock.radius * 0.35,
+        colors.textShadow,
+      );
+    }
+  }
+
   private renderHud(center: ReturnType<typeof vec2>): void {
     // Top Arcade HUD Bar
     const hudY = 24;
@@ -695,7 +847,7 @@ export class SuperMarioGame implements GameModule {
 
     // Instructions footer
     drawTextScreen(
-      'Move: A/D or Left/Right   Jump: W/Up/Space   Restart: R',
+      'Move: A/D or Left/Right   Jump: W/Up/Space   Throw: F   Restart: R',
       vec2(center.x, mainCanvasSize.y - 22),
       15,
       colors.textWhite,

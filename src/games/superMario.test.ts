@@ -171,3 +171,38 @@ test('reset clears temporary entities and restores initial level', () => {
   assert.ok(runtime.getEntity('player-1').ok);
 });
 
+test('pressing f throws rock projectile and defeats enemy', () => {
+  assert.ok(runtime.getEntity('enemy-1').ok);
+  // Position player to the left of enemy-1 (enemy is at x: 9.0, y: 1.4)
+  runtime.setEntityPosition('player-1', { x: 6.5, y: 1.45 });
+  // Ensure player is facing right
+  game.update({ ...frame, movement: { x: 1, y: 0 } });
+  // Throw rock projectile
+  game.update({ ...frame, throwRock: true });
+  // Step simulation until rock hits enemy-1
+  for (let i = 0; i < 40; i++) {
+    game.update(frame);
+    if (!runtime.getEntity('enemy-1').ok) break;
+  }
+  assert.equal(runtime.getEntity('enemy-1').ok, false, 'Enemy should be defeated by rock projectile');
+  const state = runtime.getGameState();
+  assert.ok(state.ok);
+  assert.equal(state.data.score, 200);
+});
+
+test('rock projectile thrown left defeats enemy to the left', () => {
+  assert.ok(runtime.getEntity('enemy-1').ok);
+  // Position player to the right of enemy-1 (enemy is at x: 9.0, y: 1.4)
+  runtime.setEntityPosition('player-1', { x: 11.0, y: 1.45 });
+  // Face left
+  game.update({ ...frame, movement: { x: -1, y: 0 } });
+  // Throw rock projectile
+  game.update({ ...frame, throwRock: true });
+  // Step simulation until rock hits enemy-1
+  for (let i = 0; i < 40; i++) {
+    game.update(frame);
+    if (!runtime.getEntity('enemy-1').ok) break;
+  }
+  assert.equal(runtime.getEntity('enemy-1').ok, false, 'Enemy should be defeated by leftward rock');
+});
+

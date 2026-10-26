@@ -22,6 +22,7 @@ export interface GameFrame {
   deltaSeconds: number;
   movement: Position2D;
   restart: boolean;
+  throwRock?: boolean;
 }
 
 export interface GameContext {
