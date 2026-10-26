@@ -53,6 +53,8 @@ export const toolSchemas = {
   getRuntimeStatus: z.object({}).strict(),
   reloadGame: z.object({}).strict(),
   stopGame: z.object({}).strict(),
+  beginCreation: z.object({ gameId: z.string().regex(/^[a-z0-9-]+$/).max(128), title: z.string().min(1).max(120), prompt: z.string().max(4000).default(''), openBrowser: z.boolean().default(true) }).strict(),
+  updateCreation: z.object({ gameId: z.string().regex(/^[a-z0-9-]+$/).max(128), stage: z.enum(['planning', 'authoring', 'testing', 'error']), message: z.string().min(1).max(4000) }).strict(),
   stepGame: z.object({ frames: z.number().int().min(1).max(600) }).strict(),
   simulateInput: z.object({ x: finiteNumber.min(-1).max(1), y: finiteNumber.min(-1).max(1), frames: z.number().int().min(1).max(600) }).strict(),
 };
@@ -60,9 +62,13 @@ export const toolSchemas = {
 export function createMcpServer(bridge = new GameBridgeClient(), lifecycle = new RuntimeLifecycleManager()): McpServer {
   const server = new McpServer(
     { name: 'lorecraft-game', version: '0.1.0' },
-    { instructions: 'Author source in src/games, register games in the manifest, then list/select/launch games. launch_game validates with pnpm build and waits for the browser; reload_game validates and replaces the document. Runtime entity tools use the authenticated bridge. Stop owned servers before ending work.' },
+    { instructions: 'Before writing a game, call begin_game_creation with its gameId, title, and user prompt. This opens the LoreCraft studio and displays live progress while you author source. Call update_game_creation at meaningful planning/authoring/testing milestones and on errors. Author source in src/games and register it in the literal manifest; list_games reads fresh metadata without an MCP restart. Then call launch_game with the same gameId to validate/build and verify the game in the background and add it to the studio game library. The user can keep playing another game; do not replace their selected preview or open a blank game tab. reload_game validates edits. Runtime tools control the embedded game. Stop owned servers when requested or when ending the MCP session.' },
   );
   server.server.onclose = () => { void Promise.all([bridge.close(), lifecycle.stopGame()]); };
+  server.registerTool('begin_game_creation', { description: 'Call FIRST before editing game source. Open the LoreCraft website and display agent creation progress. The game ID can be new and need not be registered yet. Does not generate code itself.', inputSchema: toolSchemas.beginCreation },
+    async ({ gameId, title, prompt, openBrowser }) => toToolResult(await lifecycle.beginCreation(gameId, title, prompt, openBrowser)));
+  server.registerTool('update_game_creation', { description: 'Publish a real authoring/testing milestone or error in the LoreCraft website. Call while creating the game; launch_game performs the actual build and preview loading.', inputSchema: toolSchemas.updateCreation },
+    ({ gameId, stage, message }) => toToolResult(lifecycle.updateCreation(gameId, stage, message)));
 
   server.registerTool('list_games', {
     description: 'List registered source-authored games available to launch.', inputSchema: toolSchemas.listGames,

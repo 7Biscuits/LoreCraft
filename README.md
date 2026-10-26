@@ -97,7 +97,7 @@ pnpm scaffold my-game "a space shooter with 4 enemies"
 pnpm typecheck
 ```
 
-The scaffolder creates `src/games/my-game/index.ts`, `config.ts`, and `assets/README.md`, then registers the module in `manifest.ts`. Existing IDs and unsafe paths are rejected. Keep each game's assets/configuration together; use relative asset imports. The browser loader validates the module contract and ID. Restart MCP after changing the static manifest.
+The scaffolder creates `src/games/my-game/index.ts`, `config.ts`, and `assets/README.md`, then registers the module in `manifest.ts`. Existing IDs and unsafe paths are rejected. Keep each game's assets/configuration together; use relative asset imports. The browser loader validates the module contract and ID. The managed catalog reads fresh manifest metadata; adding a game does not require restarting MCP.
 
 ## MCP and managed runtime
 
@@ -112,7 +112,11 @@ pnpm mcp
 
 `setup:mcp` generates a local `.agents/mcp_config.json`, deriving the checkout path and preserving other server settings. stdout remains reserved for MCP messages.
 
-Lifecycle tools are `list_games`, `select_game`, `launch_game`, `get_runtime_status`, `reload_game`, and `stop_game`. Launch validates with the fixed `pnpm build` command, starts owned Vite/relay servers, opens a browser, and waits for an identified ready session. Reload validates source and starts a fresh document/session. Stop cancels builds, stops owned listeners, and requests acknowledged browser disposal. Unconfirmed browser teardown is reported in diagnostics. Unrelated servers are never adopted or killed.
+Creation tools are `begin_game_creation` and `update_game_creation`. Call begin before authoring, publish real milestones with update, then call launch when the source is ready. Restart your coding agent’s LoreCraft MCP connection after upgrading to discover these tools.
+
+Lifecycle tools are `list_games`, `select_game`, `launch_game`, `get_runtime_status`, `reload_game`, and `stop_game`. Launch opens the studio, validates with the fixed `pnpm build` command, starts owned Vite/relay servers, and waits for an identified ready session in a separate verification iframe. Reload validates source and starts a fresh document/session. Stop cancels builds, stops owned listeners, and requests acknowledged browser disposal. Unconfirmed browser teardown is reported in diagnostics. Unrelated servers are never adopted or killed.
+
+The studio keeps background agent activity separate from the selected playable game. Moonlit Grove, Orbit Breaker, and Dungeon After Dark open directly from **A Little Inspiration**. **Your Games**, immediately below it, lists saved projects and registered source games. Completed agent games appear there with a Play button; completion does not replace the game being played. Newly registered games in the active creation session are withheld until runtime readiness succeeds. Game-source edits wait for an explicit managed launch/reload rather than forcing a studio-wide refresh. A same-origin browser lock limits the managed verification runtime to one studio tab. Games selected for play use independent iframes without the MCP bridge, so agent runtime controls do not interrupt them. Saved projects remain browser-local; source-game entries come from the repository manifest.
 
 Stop an existing `pnpm dev` before using managed launch on the same port. The studio preview may be connected to a manually launched relay through **Inspector → Connect MCP**, then controlled with `pnpm mcp`.
 

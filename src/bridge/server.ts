@@ -17,6 +17,7 @@ export interface BridgeServerOptions {
   acceptRuntime?: (identity: RuntimeIdentity | undefined) => boolean;
   onRuntimeChange?: (presence: RuntimePresence | undefined) => void;
   heartbeatIntervalMs?: number;
+  getStudioActivity?: () => unknown;
 }
 
 type ClientRole = 'runtime' | 'client' | undefined;
@@ -25,7 +26,15 @@ type PendingRequest = { client: WebSocket; runtime: WebSocket; timer: ReturnType
 /** Local relay between one browser game runtime and one or more Node clients. */
 export class RuntimeBridgeServer {
   private readonly server: WebSocketServer;
-  private readonly httpServer = createServer((_request, response) => { response.writeHead(404).end(); });
+  private readonly httpServer = createServer((request, response) => {
+    if (request.method !== 'GET' || request.url !== '/agent-status') { response.writeHead(404).end(); return; }
+    if (!hasBridgeAccess(request.headers.authorization, this.accessToken)) { response.writeHead(401).end(); return; }
+    if (request.headers.origin && !this.allowedOrigins.has(request.headers.origin)) { response.writeHead(403).end(); return; }
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    response.end(JSON.stringify({ connected: true, activity: this.options.getStudioActivity?.() ?? null }));
+  });
+  private readonly accessToken: string;
+  private readonly allowedOrigins: Set<string>;
   private readonly connections = new Set<Socket>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly roles = new Map<WebSocket, ClientRole>();
@@ -48,6 +57,7 @@ export class RuntimeBridgeServer {
     const token = options.token ?? loadOrCreateBridgeToken();
     if (!token) throw new Error('A non-empty bridge token is required.');
     const origins = new Set(options.allowedOrigins ?? defaultBridgeOrigins);
+    this.accessToken = token; this.allowedOrigins = origins;
     this.server = new WebSocketServer({
       server: this.httpServer,
       perMessageDeflate: false, maxPayload: 4 * 1024 * 1024,
@@ -165,6 +175,7 @@ export class RuntimeBridgeServer {
     if (message.kind === 'response') return this.forwardResponse(socket, message);
     if (message.kind === 'runtimeStatus' && socket === this.runtime && this.presence) {
       this.presence = { ...this.presence, state: message.state, message: message.message };
+      this.log(`Runtime ${this.presence.runtimeId}: ${message.state}${message.message ? ` (${message.message})` : ''}`);
       this.options.onRuntimeChange?.(this.runtimeStatus);
     }
   }
@@ -184,7 +195,7 @@ export class RuntimeBridgeServer {
       this.runtime = socket;
       this.presence = hello.identity ? { ...hello.identity, state: 'initializing' } : undefined;
       this.options.onRuntimeChange?.(this.runtimeStatus);
-      this.log('Game runtime connected.');
+      this.log(`Game runtime connected${hello.identity ? ` (${hello.identity.runtimeId})` : ''}.`);
     }
     this.roles.set(socket, role);
   }

@@ -4,6 +4,8 @@ import { playtest } from './playtest';
 import { exportHtml } from './export';
 import { deleteProject, newProject, readCheckpoint, readProjects, saveCheckpoint, saveProject } from './storage';
 import type { WorldState } from './engine';
+import { agentActivitySchema } from './agentState';
+import type { AgentActivity } from './agentState';
 
 const paths: Record<string, string> = {
   spark: '<path d="m12 3 2.3 6.7L21 12l-6.7 2.3L12 21l-2.3-6.7L3 12l6.7-2.3L12 3Z"/>',
@@ -53,6 +55,20 @@ export async function startStudio(): Promise<void> {
   let audio: AudioContext | undefined;
   let lastScore = 0, lastHealth = revision.spec.lives;
   let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  let agentActivity: AgentActivity | undefined;
+  let agentRuntimeUrl = '';
+  let previewId = '';
+  let backgroundActivity: AgentActivity | undefined;
+  let backgroundUrl = '';
+  let sourceGames: { id: string; title: string }[] = [];
+  let catalogPoll = 0;
+  let renderedLibrary = '';
+  let ownsAgentRuntime = false, requestingAgentLock = false;
+  let releaseAgentLock: (() => void) | undefined;
+  let activityTimer: ReturnType<typeof setTimeout> | undefined;
+  let pageClosed = false;
+  let gameState: unknown;
+  let agentChecks: Revision['checks'] = [];
   const pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
   document.body.innerHTML = `
@@ -64,6 +80,7 @@ export async function startStudio(): Promise<void> {
       <nav aria-label="Main navigation"><button class="nav-item active" data-action="workspace">${icon('grid')} Workspace <span class="nav-dot"></span></button><button class="nav-item" data-action="projects">${icon('folder')} My projects <span id="project-count">0</span></button><button class="nav-item" data-action="history">${icon('clock')} Version history</button></nav>
       <div class="sidebar-divider"></div><div class="nav-label">A LITTLE INSPIRATION</div>
       <div class="inspiration">${examples.slice(0, 3).map((example, i) => `<button data-action="example" data-index="${i}"><span class="tiny-world theme-${example.theme}">${['✦', '✧', '♜'][i]}</span><span>${example.title}<small>${example.label}</small></span>${icon('arrow')}</button>`).join('')}</div>
+      <div class="nav-label">YOUR GAMES</div><div id="game-library" class="inspiration" aria-label="Playable games"></div>
       <div class="sidebar-bottom"><div class="studio-note">${icon('leaf')}<span>Big worlds.<br>A little imagination.</span></div><button class="nav-item" data-action="help">${icon('help')} How it works</button><button class="profile" data-action="settings"><span class="avatar">LC</span><span>Creator workspace<small>Saved on this device</small></span>${icon('settings')}</button></div>
     </aside>
     <div class="main-shell">
@@ -73,6 +90,7 @@ export async function startStudio(): Promise<void> {
           <div class="eyebrow"><span class="little-star">✦</span> YOUR IMAGINATION, PLAYABLE</div>
           <h1>A little lore.<br> A whole <em>world.</em></h1>
           <p class="intro">Dream up something worth playing.<br> We’ll help you bring it to life.</p>
+          <section id="agent-activity" hidden aria-live="polite" aria-label="Coding agent activity"></section>
           <form id="prompt-form"><label class="prompt-label" for="prompt">What would you like to create?</label><div class="prompt-box"><textarea id="prompt" maxlength="4000" placeholder="A tiny explorer in an enchanted forest, collecting crystals under the moonlight…" required minlength="3"></textarea><div class="prompt-bottom"><span>${icon('spark')} <select id="generation-mode" aria-label="Generation mode"><option value="local">Local generation</option><option value="ai" disabled>AI · connect a key</option></select></span><span id="prompt-count">0 / 4000</span></div><button class="generate-button" type="submit" id="generate">${icon('spark')} Create my game ${icon('arrow')}</button></div></form>
           <div class="try-row"><span>Or start with a spark</span></div><div class="prompt-chips">${examples.map((e, i) => `<button data-action="example" data-index="${i}">${['☘', '✧', '♜', '≈'][i]} ${e.label}</button>`).join('')}</div>
           <div id="generation-progress" hidden aria-live="polite"></div>
@@ -92,13 +110,14 @@ export async function startStudio(): Promise<void> {
         </section>
       </main>
     </div>
-  </div><div id="toast" role="status" aria-live="polite"></div><dialog id="modal" aria-label="Studio dialog"></dialog><input type="file" id="import-file" accept=".json,application/json" hidden>`;
+  </div><iframe id="agent-frame" class="background-runtime" title="Coding agent verification runtime" aria-hidden="true" tabindex="-1"></iframe><div id="toast" role="status" aria-live="polite"></div><dialog id="modal" aria-label="Studio dialog"></dialog><input type="file" id="import-file" accept=".json,application/json" hidden>`;
 
   const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
   const frame = $<HTMLIFrameElement>('#game-frame');
+  const agentFrame = $<HTMLIFrameElement>('#agent-frame');
   const toast = (message: string) => { $('#toast').textContent = message; $('#toast').classList.add('visible'); setTimeout(() => $('#toast').classList.remove('visible'), 4500); };
   const persist = () => {
-    try { saveProject(project); library = readProjects(); $('#save-status').innerHTML = '<i></i> Saved locally'; $('#project-count').textContent = String(library.length); }
+    try { saveProject(project); library = readProjects(); $('#save-status').innerHTML = '<i></i> Saved locally'; $('#project-count').textContent = String(library.length); renderLibrary(); }
     catch (error) { $('#save-status').textContent = 'Not saved'; toast(error instanceof Error ? error.message : 'Could not save. Export the project to keep your work.'); }
   };
   const request = (operation: string, args: Record<string, unknown> = {}): Promise<any> => {
@@ -116,6 +135,13 @@ export async function startStudio(): Promise<void> {
 
   function renderDetails() {
     const spec = revision.spec;
+    if (agentActivity && tab !== 'inspector') {
+      const a = agentActivity;
+      if (tab === 'overview') $('#detail-content').innerHTML = `<div class="agent-overview"><span class="section-caption">CREATED WITH YOUR CODING AGENT</span><h3>${escape(a.title)}</h3><p>${escape(a.prompt || 'A source-authored game, loaded directly from this repository.')}</p><div class="objective">${icon('spark')}<span>${escape(a.message)}</span></div><p class="source-note">Arrow keys / WASD to move. Up or W jumps in Mario. P pauses; R restarts. Click Play to focus the game.</p></div>`;
+      else if (tab === 'tests') $('#detail-content').innerHTML = `<div class="panel-heading"><div><h3>Source-game runtime checks</h3><p>Custom games expose their own checks; a snapshot check alone does not verify gameplay.</p></div><button class="button" data-action="run-tests">Run checks</button></div>${agentChecks.map((c) => `<div class="check-row ${c.passed ? 'passed' : 'failed'}"><strong>${escape(c.name)}</strong><p>${escape(c.detail)}</p><small>${c.passed ? 'PASS' : 'FAIL'}</small></div>`).join('')}`;
+      else $('#detail-content').innerHTML = `<div class="panel-heading"><div><h3>Live game state</h3><p>Source: src/games/${escape(a.gameId)}/index.ts. The coding agent edits the source; this view is read-only.</p></div></div><pre class="agent-state">${escape(JSON.stringify(gameState ?? { status: a.stage }, null, 2))}</pre>`;
+      return;
+    }
     if (tab === 'overview') {
       $('#detail-content').innerHTML = `<div class="overview-grid"><div class="overview-story"><span class="section-caption">THE LITTLE LORE</span><h3>${escape(spec.title)}</h3><p>${escape(spec.description)}</p><div class="objective">${icon('spark')}<span>${escape(objective(spec))}</span></div></div><div class="world-details"><span class="section-caption">WORLD DETAILS</span><dl><div><dt>World</dt><dd>${themeNames[spec.theme]}</dd></div><div><dt>Genre</dt><dd>${genreNames[spec.genre]}</dd></div><div><dt>Difficulty</dt><dd><span class="difficulty-dots">${'●'.repeat(spec.difficulty === 'hard' ? 3 : spec.difficulty === 'normal' ? 2 : 1)}<span>${'●'.repeat(spec.difficulty === 'hard' ? 0 : spec.difficulty === 'normal' ? 1 : 2)}</span></span> ${spec.difficulty}</dd></div><div><dt>Controls</dt><dd><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> + <kbd>⇧</kbd></dd></div></dl></div></div><div class="refine-hint">${icon('spark')} A different twist? Try “make it a space shooter” or “add more enemies” in the prompt.</div>`;
     } else if (tab === 'tests') {
@@ -143,6 +169,7 @@ export async function startStudio(): Promise<void> {
   }
 
   function loadPreview(bridge = false) {
+    if (agentActivity) { agentActivity = undefined; agentRuntimeUrl = ''; $('#build-note').hidden = false; updateProjectView(); }
     for (const value of pending.values()) { clearTimeout(value.timer); value.reject(new Error('Preview was replaced.')); } pending.clear();
     ready = false; paused = true; snapshot = undefined; entities = []; lastScore = 0; lastHealth = revision.spec.lives;
     if (tab === 'inspector') renderDetails();
@@ -160,11 +187,16 @@ export async function startStudio(): Promise<void> {
 
   window.addEventListener('message', (event) => {
     if (event.origin !== location.origin || event.source !== frame.contentWindow || event.data?.source !== 'lorecraft-player') return;
+    if (agentActivity && event.data.previewId !== previewId) return;
     const { type, data, requestId } = event.data;
     if (type === 'ready') { ready = true; clearTimeout(loadTimer); $('#loading-cover').hidden = true; $('#game-overlay').hidden = false; $('#runtime-label').textContent = 'Ready to play'; }
-    if (type === 'error') { clearTimeout(loadTimer); $('#loading-cover').hidden = true; toast(`Game error: ${String(data)}`); logs.push({ level: 'error', message: String(data), timestamp: new Date().toISOString() }); }
+    if (type === 'error') { if (agentActivity) { const a = { ...agentActivity, stage: 'error' as const, message: String(data) }; agentActivity = a; $('#runtime-label').textContent = 'Game error'; } clearTimeout(loadTimer); $('#loading-cover').hidden = true; toast(`Game error: ${String(data)}`); logs.push({ level: 'error', message: String(data), timestamp: new Date().toISOString() }); }
     if (type === 'response') { const waiter = pending.get(requestId); if (waiter) { clearTimeout(waiter.timer); pending.delete(requestId); if (data?.ok === false) waiter.reject(new Error(data.error?.message ?? 'Runtime operation failed.')); else waiter.resolve(data); } }
+    if (type === 'navigate' && agentActivity) { loadAgentPreview(String(data)); }
+    if (type === 'stopped' && agentActivity) { ready = false; agentActivity = { ...agentActivity, stage: 'stopped', message: String(data) }; $('#game-overlay').hidden = true; $('#runtime-label').textContent = 'Stopped by agent'; }
+    if (type === 'replaced' && agentActivity) toast(String(data));
     if (type === 'state') {
+      gameState = data.gameState;
       const firstEntities = entities.length === 0;
       snapshot = data.snapshot as WorldState; paused = data.paused; entities = data.entities?.data ?? []; logs = data.logs ?? [];
       if (tab === 'inspector' && firstEntities && entities.length) renderDetails();
@@ -183,7 +215,10 @@ export async function startStudio(): Promise<void> {
   }
 
   async function generate(prompt: string) {
-    if (generating) return; generating = true;
+    if (generating) return;
+    const baseSpec = revision.spec;
+    const destination = structuredClone(project);
+    generating = true;
     $('#generate').setAttribute('disabled', ''); $('#prompt').setAttribute('disabled', '');
     const progress = $('#generation-progress'); progress.hidden = false;
     progress.innerHTML = `<div class="progress-title"><span class="spinner"></span> A world is taking shape</div>${['Reading your little lore', 'Building the scene and rules', 'Running gameplay checks', 'Preparing your playable world'].map((label, i) => `<div class="progress-step" id="progress-${i}"><span>${i + 1}</span>${label}</div>`).join('')}`;
@@ -193,18 +228,21 @@ export async function startStudio(): Promise<void> {
       // Static deployments retain a complete local workflow; AI requests require the local server endpoint.
       if (generationMode === 'local') {
         await new Promise((resolve) => setTimeout(resolve, 100));
-        const spec = compilePrompt(prompt, revision.spec); $('#progress-1').classList.add('done');
+        const spec = compilePrompt(prompt, baseSpec); $('#progress-1').classList.add('done');
         await new Promise((resolve) => setTimeout(resolve, 100)); result = { spec, source: 'local', checks: playtest(spec) };
       } else {
-        const response = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(65000), body: JSON.stringify({ prompt, previous: revision.spec, mode: 'ai' }) });
+        const response = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(65000), body: JSON.stringify({ prompt, previous: baseSpec, mode: 'ai' }) });
         const payload = await response.json(); if (!response.ok) throw new Error(payload.error ?? 'AI generation failed.');
         result = { ...payload, spec: gameSpecSchema.parse(payload.spec) }; $('#progress-1').classList.add('done');
       }
       $('#progress-2').classList.add('done');
       if (result.checks.some((c) => !c.passed)) throw new Error(`Playtest failed: ${result.checks.filter((c) => !c.passed).map((c) => c.name).join(', ')}. Your current world is preserved.`);
-      await addRevision(result.spec, prompt, result.source, result.checks); $('#progress-3').classList.add('done');
+      const next: Revision = { id: uuid(), spec: result.spec, prompt, source: result.source, checks: result.checks, createdAt: new Date().toISOString() };
+      const saved = result.spec.title !== baseSpec.title || agentActivity ? newProject(next) : { ...destination, revisions: [...destination.revisions, next].slice(-50), activeRevisionId: next.id, updatedAt: next.createdAt };
+      saveProject(saved); library = readProjects(); renderLibrary(); $('#project-count').textContent = String(library.length);
+      $('#progress-3').classList.add('done');
       $<HTMLTextAreaElement>('#prompt').value = ''; $('#prompt-count').textContent = '0 / 4000';
-      toast(`${result.spec.title} is ready. ${result.checks.length} gameplay checks passed.`);
+      toast(`${result.spec.title} is ready. Select it in Your games to play.`);
       setTimeout(() => { progress.hidden = true; }, 2500);
     } catch (error) { progress.hidden = true; toast(error instanceof Error ? error.message : 'Generation failed. Your current world is preserved.'); }
     finally { generating = false; $('#generate').removeAttribute('disabled'); $('#prompt').removeAttribute('disabled'); }
@@ -213,28 +251,34 @@ export async function startStudio(): Promise<void> {
   const play = async () => { await request('resumeGame'); frame.contentWindow?.focus(); };
   const showProjects = () => {
     try { library = readProjects(); } catch (error) { toast(String(error)); }
-    modal('Your little worlds', `<p class="modal-intro">Projects stay on this browser. Export a project file to back it up or move it to another device.</p><div class="project-grid">${library.map((p) => { const r = p.revisions.find((v) => v.id === p.activeRevisionId)!; return `<div class="project-card"><div class="project-art theme-${r.spec.theme}"><span>${r.spec.theme === 'forest' ? '♣' : r.spec.theme === 'space' ? '✧' : r.spec.theme === 'ocean' ? '≈' : '♜'}</span></div><div><h3>${escape(r.spec.title)}</h3><p>${genreNames[r.spec.genre]} · ${p.revisions.length} revision${p.revisions.length === 1 ? '' : 's'}</p><div class="inline-actions"><button class="button small" data-action="open-project" data-id="${escape(p.id)}">Open world</button><button class="icon-button danger" data-action="delete-project" data-id="${escape(p.id)}" aria-label="Delete ${escape(r.spec.title)}">${icon('trash')}</button></div></div></div>`; }).join('') || '<p>No saved projects yet.</p>'}</div><button class="button" data-action="import">${icon('folder')} Import project JSON</button>`);
+    modal('Your little worlds', `<div class="mobile-game-library inspiration">${sourceGames.map((g) => `<button data-action="open-source-game" data-id="${escape(g.id)}">${icon('play')}<span>${escape(g.title)}<small>Source game</small></span></button>`).join('')}${examples.slice(0, 3).map((g, i) => `<button data-action="example" data-index="${i}"><span>${escape(g.title)}<small>Inspiration · Play</small></span></button>`).join('')}</div><p class="modal-intro">Projects stay on this browser. Export a project file to back it up or move it to another device.</p><div class="project-grid">${library.map((p) => { const r = p.revisions.find((v) => v.id === p.activeRevisionId)!; return `<div class="project-card"><div class="project-art theme-${r.spec.theme}"><span>${r.spec.theme === 'forest' ? '♣' : r.spec.theme === 'space' ? '✧' : r.spec.theme === 'ocean' ? '≈' : '♜'}</span></div><div><h3>${escape(r.spec.title)}</h3><p>${genreNames[r.spec.genre]} · ${p.revisions.length} revision${p.revisions.length === 1 ? '' : 's'}</p><div class="inline-actions"><button class="button small" data-action="open-project" data-id="${escape(p.id)}">Open world</button><button class="icon-button danger" data-action="delete-project" data-id="${escape(p.id)}" aria-label="Delete ${escape(r.spec.title)}">${icon('trash')}</button></div></div></div>`; }).join('') || '<p>No saved projects yet.</p>'}</div><button class="button" data-action="import">${icon('folder')} Import project JSON</button>`);
   };
 
   document.addEventListener('click', (event) => {
     const button = (event.target as Element).closest<HTMLElement>('[data-action]'); if (!button) return;
     const action = button.dataset.action;
     safe(async () => {
+      if (agentActivity && ['rename', 'apply-source', 'checkpoint', 'restore-checkpoint'].includes(action ?? '')) throw new Error('This source-authored game is managed by your coding agent. Project JSON editing and checkpoints apply to studio-generated games.');
       if (generating && ['new', 'open-project', 'confirm-delete', 'restore-revision', 'rename', 'apply-source', 'import'].includes(action ?? '')) throw new Error('Wait for generation to finish before changing projects or revisions.');
-      if (action === 'menu') modal('Your studio', `<div class="mobile-nav"><button class="button" data-action="new">New world</button><button class="button" data-action="projects">My projects</button><button class="button" data-action="history">Version history</button><button class="button" data-action="settings">Creation engine</button><button class="button" data-action="help">How it works</button></div>`);
+      if (action === 'open-source-game') { openSourceGame(button.dataset.id!); $<HTMLDialogElement>('#modal').close(); }
+      else if (action === 'exit-agent') { loadPreview(); }
+      else if (action === 'export-agent-state') { download(`${agentActivity?.gameId ?? 'game'}-state.json`, JSON.stringify(gameState, null, 2)); }
+      else if (action === 'menu') modal('Your studio', `<div class="mobile-nav"><button class="button" data-action="new">New world</button><button class="button" data-action="projects">My projects</button><button class="button" data-action="history">Version history</button><button class="button" data-action="settings">Creation engine</button><button class="button" data-action="help">How it works</button></div>`);
       else if (action === 'close-modal') $<HTMLDialogElement>('#modal').close();
       else if (action === 'workspace') $<HTMLDialogElement>('#modal').close();
       else if (action === 'play') await play();
       else if (action === 'toggle-play') { if (paused) await play(); else await request('pauseGame'); }
-      else if (action === 'restart') { if (!ready) loadPreview(); else { await request('resetGame'); await play(); } }
+      else if (action === 'restart') { if (!ready && agentActivity?.runtimeUrl) loadAgentPreview(agentActivity.runtimeUrl, true); else if (!ready) loadPreview(); else { await request('resetGame'); await play(); } }
       else if (action === 'step') { await request('stepGame', { frames: 1 }); toast('Advanced exactly one simulation frame.'); }
       else if (action === 'fullscreen') { if (!document.fullscreenElement) await $('#game-stage').requestFullscreen(); else await document.exitFullscreen(); }
       else if (action === 'sound') { muted = !muted; $('#sound-button').classList.toggle('sound-on', !muted); $('#sound-button').setAttribute('aria-label', muted ? 'Enable sound effects' : 'Mute sound effects'); $('#sound-button').title = muted ? 'Sound effects off' : 'Sound effects on'; if (!muted) sound(520); toast(muted ? 'Sound effects off.' : 'Sound effects on.'); }
       else if (action === 'screenshot') { const result = await request('captureScreenshot'); download(`${revision.spec.title}.png`, result.data.dataUrl); toast('Screenshot downloaded.'); }
+      else if (action === 'save' && agentActivity) { toast('This game is stored as source in your repository. Ask your coding agent to save or commit it.'); }
       else if (action === 'save') { persist(); toast('Project saved on this device. Export a JSON backup to take it with you.'); }
       else if (action === 'new') { if (generating) return; $<HTMLDialogElement>('#modal').close(); project = newProject({ ...first, id: uuid(), createdAt: new Date().toISOString() }); persist(); updateProjectView(); loadPreview(); $<HTMLTextAreaElement>('#prompt').value = ''; $('#prompt').focus(); toast('A fresh canvas. What world will you create?'); }
-      else if (action === 'example') { const example = examples[Number(button.dataset.index)]!; $<HTMLTextAreaElement>('#prompt').value = example.prompt; $('#prompt-count').textContent = `${example.prompt.length} / 4000`; $('#prompt').focus(); }
+      else if (action === 'example') { $<HTMLDialogElement>('#modal').close(); const example = examples[Number(button.dataset.index)]!; const spec = compilePrompt(example.prompt); project = library.find((p) => p.revisions.length === 1 && p.revisions[0]?.prompt === example.prompt) ?? newProject({ id: uuid(), spec, prompt: example.prompt, source: 'local', createdAt: new Date().toISOString(), checks: playtest(spec) }); persist(); updateProjectView(); loadPreview(); toast(`${spec.title} is ready to play.`); }
       else if (action === 'tab') { tab = button.dataset.tab!; document.querySelectorAll('[role=tab]').forEach((el) => { const selected = (el as HTMLElement).dataset.tab === tab; el.classList.toggle('selected', selected); el.setAttribute('aria-selected', String(selected)); }); if (tab === 'inspector' && ready) await request('pauseGame'); renderDetails(); }
+      else if (action === 'run-tests' && agentActivity) { const result = await request('runGameplayTest'); agentChecks = result.data?.checks ?? []; renderDetails(); }
       else if (action === 'run-tests') { revision.checks = playtest(revision.spec); persist(); renderDetails(); toast(`${revision.checks.filter((c) => c.passed).length}/${revision.checks.length} checks passed.`); }
       else if (action === 'apply-source') { const spec = gameSpecSchema.parse(JSON.parse($<HTMLTextAreaElement>('#source-editor').value)); const checks = playtest(spec); if (checks.some((c) => !c.passed)) throw new Error('Edited game did not pass gameplay checks.'); await addRevision(spec, 'Edited game specification', 'local', checks); toast('Validated source applied as a new revision.'); }
       else if (action === 'rename') modal('Name your world', `<form id="rename-form"><label for="world-name">Game title</label><input id="world-name" required maxlength="60" value="${escape(revision.spec.title)}"><button class="button primary" type="submit">Save title</button></form>`);
@@ -253,11 +297,12 @@ export async function startStudio(): Promise<void> {
         await request('pauseGame');
         const value = (id: string) => Number($<HTMLInputElement>(id).value);
         const x = value('#entity-x'), y = value('#entity-y'), w = value('#entity-w'), h = value('#entity-h'), speed = value('#entity-speed');
-        if (![x, y, w, h, speed].every(Number.isFinite) || w <= 0 || h <= 0 || w > 10 || h > 10 || speed < 0 || speed > 30 || x < 0 || x > 24 || y < 0 || y > 14) throw new Error('Use finite world positions (X 0–24, Y 0–14), positive sizes up to 10, and speed 0–30.');
+        if (![x, y, w, h, speed].every(Number.isFinite) || w <= 0 || h <= 0 || w > 100 || h > 100 || speed < 0 || speed > 1000 || (!agentActivity && (x < 0 || x > 24 || y < 0 || y > 14)) || Math.abs(x) > 10000 || Math.abs(y) > 10000) throw new Error('Use finite world positions (X 0–24, Y 0–14), positive sizes up to 10, and speed 0–30.');
         await request('setEntityProperties', { id: selectedEntity, properties: { size: { x: w, y: h }, speed } }); await request('setEntityPosition', { id: selectedEntity, position: { x, y } }); await request('stepGame', { frames: 1 }); renderDetails(); toast('Live entity updated.');
       } else if (action === 'delete-entity') { if (selectedEntity === 'player-1') throw new Error('Keep the controlling player to continue playing. Other entities can be deleted.'); await request('deleteEntity', { id: selectedEntity }); await request('stepGame', { frames: 1 }); renderDetails(); }
       else if (action === 'spawn-coin') { await request('createEntity', { id: `crystal-${Date.now()}`, type: 'coin', dimension: '2d', position: { x: 3, y: 7 }, properties: { size: { x: .4, y: .4 } } }); await request('stepGame', { frames: 1 }); renderDetails(); }
       else if (action === 'mcp') { loadPreview(true); toast('Preview will connect through the authenticated relay. Start pnpm bridge, then use pnpm mcp.'); }
+      else if (action === 'export' && agentActivity) modal('Agent-created game', `<p class="modal-intro">This game runs from <code>src/games/${escape(agentActivity.gameId)}/</code>. Ask your coding agent for a standalone source-game export. The studio JSON exporter does not serialize custom game code.</p><button class="button" data-action="screenshot">Download screenshot</button><button class="button" data-action="export-agent-state">Download inspected state</button>`);
       else if (action === 'export') modal('Take your world with you', `<p class="modal-intro">A game is better when someone else can play it.</p><div class="export-options"><button data-action="export-html">${icon('download')}<span><strong>Playable HTML game</strong><small>One file. Offline. No server or account needed.</small></span>${icon('arrow')}</button><button data-action="export-json">${icon('code')}<span><strong>LoreCraft project</strong><small>All revisions and prompts. Import to keep creating.</small></span>${icon('arrow')}</button><button data-action="import">${icon('folder')}<span><strong>Import a project</strong><small>Open a previously exported .json project.</small></span>${icon('arrow')}</button></div>`);
       else if (action === 'export-html') { download(`${revision.spec.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.html`, exportHtml(revision.spec), 'text/html'); toast('Standalone game downloaded. Double-click the HTML file to play.'); }
       else if (action === 'export-json') { download(`${revision.spec.title}.lorecraft.json`, JSON.stringify(project, null, 2)); toast('Project backup downloaded.'); }
@@ -286,9 +331,94 @@ export async function startStudio(): Promise<void> {
   }
   window.addEventListener('keydown', (event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); $('#prompt').focus(); } if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && document.activeElement === $('#prompt')) { event.preventDefault(); $<HTMLFormElement>('#prompt-form').requestSubmit(); } });
   $<HTMLDialogElement>('#modal').addEventListener('click', (event) => { if (event.target === $('#modal')) $<HTMLDialogElement>('#modal').close(); });
-  window.addEventListener('pagehide', () => { clearTimeout(loadTimer); for (const p of pending.values()) clearTimeout(p.timer); void audio?.close(); });
+  window.addEventListener('pagehide', () => { pageClosed = true; releaseAgentLock?.(); clearTimeout(activityTimer); clearTimeout(loadTimer); for (const p of pending.values()) clearTimeout(p.timer); void audio?.close(); });
 
+  function renderAgentActivity(activity: AgentActivity) {
+    backgroundActivity = activity;
+    const panel = $('#agent-activity'); panel.hidden = false;
+    const done = activity.stage === 'ready';
+    const labels: Record<string, string> = { planning: 'Request received', authoring: 'Agent authoring', testing: 'Agent checks', validating: 'Validating source', loading: 'Checking runtime', ready: 'Ready to play', error: 'Needs attention', stopped: 'Stopped' };
+    panel.innerHTML = `<div class="agent-activity-heading"><span class="${done ? 'live-dot' : activity.stage === 'error' ? 'error-dot' : 'spinner'}"></span><strong>${escape(labels[activity.stage])}</strong><span>MCP</span></div><h3>${escape(activity.title)}</h3><p>${escape(activity.message)}</p><small>You can keep playing any game while your agent works.</small><details><summary>Activity · ${activity.events.length} updates</summary><ol>${activity.events.map((e) => `<li><time>${escape(new Date(e.timestamp).toLocaleTimeString())}</time><span>${escape(e.message)}</span></li>`).join('')}</ol></details>${done ? `<button class="button small" data-action="open-source-game" data-id="${escape(activity.gameId)}">Play ${escape(activity.title)}</button>` : ''}`;
+    if (done) {
+      sourceGames = [{ id: activity.gameId, title: activity.title }, ...sourceGames.filter((g) => g.id !== activity.gameId)];
+      renderLibrary();
+    }
+  }
+  function renderLibrary() {
+    const markup = sourceGames.map((g) => `<button data-action="open-source-game" data-id="${escape(g.id)}"><span class="tiny-world theme-neon">✦</span><span>${escape(g.title)}<small>Source game · Play</small></span>${icon('play')}</button>`).join('') + library.map((p) => { const r = p.revisions.find((r) => r.id === p.activeRevisionId)!; return `<button data-action="open-project" data-id="${escape(p.id)}"><span class="tiny-world theme-${r.spec.theme}">✧</span><span>${escape(r.spec.title)}<small>Saved world · Play</small></span>${icon('play')}</button>`; }).join('');
+    if (renderedLibrary !== markup) { renderedLibrary = markup; $('#game-library').innerHTML = markup; }
+  }
+  function openSourceGame(id: string) {
+    const game = sourceGames.find((g) => g.id === id); if (!game) return;
+    agentActivity = { jobId: `library-${id}`, gameId: id, title: game.title, prompt: '', stage: 'ready', message: 'Selected from your game library.', updatedAt: new Date().toISOString(), events: [] };
+    $('#breadcrumb-title').textContent = game.title; $('#game-title').textContent = game.title; $('#overlay-title').textContent = game.title;
+    $('#overlay-description').textContent = 'Click Play to enter this game.'; $('#genre-badge').textContent = 'Source game'; $('#preview-label').textContent = `${id}.game`; $('#build-note').hidden = true;
+    const url = new URL('/', location.origin); url.search = new URLSearchParams({ game: id, session: `play-${uuid()}`, embedded: '1', bridge: '0' }).toString();
+    agentActivity.runtimeUrl = url.href; loadAgentPreview(url.href); renderDetails();
+  }
+  function loadAgentPreview(raw: string, force = false) {
+    const url = new URL(raw, location.href);
+    if (url.origin !== location.origin || url.pathname !== '/' || url.searchParams.get('embedded') !== '1' || !url.searchParams.has('session')) return;
+    if (!force && agentRuntimeUrl === url.href) return;
+    agentRuntimeUrl = url.href; ready = false; paused = true; entities = []; snapshot = undefined; gameState = undefined;
+    for (const value of pending.values()) { clearTimeout(value.timer); value.reject(new Error('The agent replaced the game preview.')); } pending.clear();
+    clearTimeout(loadTimer); $('#game-overlay').hidden = true; $('#loading-cover').hidden = false;
+    $('#loading-cover').innerHTML = '<span class="spinner"></span><span>Loading the agent-created game…</span>';
+    previewId = uuid(); url.searchParams.set('previewId', previewId); frame.src = url.href;
+    loadTimer = setTimeout(() => { if (!ready && agentActivity) { $('#loading-cover').hidden = true; $('#runtime-label').textContent = 'Game failed to initialize'; toast('This game did not initialize. Other games are still available in the sidebar.'); } }, 15000);
+  }
+  function ensureBackgroundRuntime(url: string) {
+    const load = () => { if (backgroundUrl !== url) { backgroundUrl = url; agentFrame.src = url; } };
+    if (ownsAgentRuntime || !navigator.locks) { load(); return; }
+    if (requestingAgentLock) return;
+    requestingAgentLock = true;
+    // Only one studio tab may own the MCP verification runtime. User-selected
+    // games use bridge=0, so playing or switching them cannot replace this owner.
+    void navigator.locks.request('lorecraft-managed-runtime', { ifAvailable: true }, async (lock) => {
+      if (!lock || pageClosed) return;
+      ownsAgentRuntime = true; load();
+      await new Promise<void>((resolve) => { releaseAgentLock = resolve; });
+      ownsAgentRuntime = false;
+    }).finally(() => { requestingAgentLock = false; });
+  }
+  async function pollAgentActivity() {
+    if (pageClosed) return;
+    let connected = false;
+    try {
+      const response = await fetch('/api/agent-status', { cache: 'no-store', signal: AbortSignal.timeout(1800) });
+      if (response.ok) {
+        const result = await response.json(); connected = result.connected === true;
+        const parsed = agentActivitySchema.safeParse(result.activity);
+        if (parsed.success) {
+          const a = parsed.data;
+          if (backgroundActivity?.updatedAt !== a.updatedAt || backgroundActivity?.stage !== a.stage) renderAgentActivity(a);
+          if (a.runtimeUrl && ['loading', 'ready'].includes(a.stage)) {
+            const url = new URL(a.runtimeUrl, location.href);
+            if (url.origin === location.origin && url.pathname === '/' && url.searchParams.get('embedded') === '1' && url.searchParams.has('session') && backgroundUrl !== url.href) {
+              ensureBackgroundRuntime(url.href);
+            }
+          }
+          if (a.stage === 'stopped' && backgroundUrl) { agentFrame.src = 'about:blank'; backgroundUrl = ''; }
+        }
+      }
+      if (catalogPoll++ % 5 === 0) {
+        const response = await fetch('/api/games', { cache: 'no-store', signal: AbortSignal.timeout(1800) });
+        if (response.ok) {
+          const result = await response.json();
+          if (Array.isArray(result.games)) {
+            const games = result.games.filter((g: any) => typeof g.title === 'string' && typeof g.id === 'string' && /^[a-z0-9-]+$/.test(g.id));
+            // Do not advertise a newly registered module until its runtime succeeds.
+            sourceGames = games.map((g: { id: string; title: string }) => g.id === backgroundActivity?.gameId && backgroundActivity.stage === 'ready' ? { ...g, title: backgroundActivity.title } : g).filter((g: { id: string }) => g.id !== backgroundActivity?.gameId || backgroundActivity.stage === 'ready' || result.existingGameIds?.includes(g.id) || sourceGames.some((existing) => existing.id === g.id));
+            renderLibrary();
+          }
+        }
+      }
+    } catch { /* Playing existing games does not depend on the agent connection. */ }
+    if (!connected && backgroundActivity && !['stopped', 'ready', 'error'].includes(backgroundActivity.stage)) renderAgentActivity({ ...backgroundActivity, stage: 'error', message: 'The MCP connection is offline. Your other games remain playable.' });
+    if (!pageClosed) activityTimer = setTimeout(() => { void pollAgentActivity(); }, connected ? 800 : 2500);
+  }
   persist(); updateProjectView(); loadPreview();
+  void pollAgentActivity();
   if (storageError) toast(storageError);
   try { const response = await fetch('/api/status', { signal: AbortSignal.timeout(3000) }); if (response.ok) { const status = await response.json(); aiAvailable = Boolean(status.aiAvailable); if (aiAvailable) { const option = $<HTMLSelectElement>('#generation-mode').options[1]!; option.disabled = false; option.textContent = 'AI generation'; } } } catch { /* Static/offline mode intentionally keeps local generation available. */ }
 }

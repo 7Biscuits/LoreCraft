@@ -3,7 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { RuntimeBridgeServer } from '../bridge/server';
 import { runtimeProxy } from '../bridge/viteProxy';
 import type { RuntimeIdentity } from '../bridge/protocol';
-import { defaultGameId, gameCatalog } from '../games/manifest';
+import { defaultGameId } from '../games/manifest';
+import { readGameCatalog } from '../games/readManifest';
+import type { AgentActivity } from '../studio/agentState';
 import { openBrowser, validateSource } from './processes';
 
 export interface RuntimeLifecycleStatus {
@@ -15,6 +17,7 @@ export interface RuntimeLifecycleStatus {
   message?: string;
   diagnostics: string[];
   ownsServers: boolean;
+  activity?: AgentActivity;
 }
 
 export type LifecycleResult =
@@ -52,13 +55,47 @@ export class RuntimeLifecycleManager {
   private stopping?: Promise<LifecycleResult>;
   private readonly root: string;
   private readonly vitePort: number;
+  private activity?: AgentActivity;
+  private runtimePublished = false;
+  private studioOpened = false;
 
   constructor(private readonly options: LifecycleOptions = {}) {
     this.root = options.root ?? fileURLToPath(new URL('../../', import.meta.url));
     this.vitePort = options.vitePort ?? Number(process.env.LORECRAFT_VITE_PORT ?? 5173);
   }
 
-  listGames() { return gameCatalog.map(({ id, title }) => ({ id, title })); }
+  listGames() { return readGameCatalog(this.root).map(({ id, title }) => ({ id, title })); }
+
+  getActivity(): AgentActivity | undefined {
+    const presence = this.bridge?.runtimeStatus;
+    if (this.activity && this.runtimePublished && presence && presence.sessionId === this.sessionId) {
+      if (presence.state === 'ready' && this.activity.stage === 'loading') this.progress('ready', 'Game initialized. Ready to play in the preview.');
+      if (presence.state === 'error' && this.activity.stage !== 'error') this.progress('error', presence.message ?? 'The game failed to initialize.');
+    }
+    return this.activity ? { ...this.activity, events: [...this.activity.events], studioUrl: this.url, runtimeUrl: this.runtimePublished && this.devServer ? this.gameUrl() : undefined } : undefined;
+  }
+
+  beginCreation(gameId: string, title: string, prompt: string, open = true): Promise<LifecycleResult> {
+    return this.run(async (signal) => {
+      if (!/^[a-z0-9-]{1,128}$/.test(gameId)) return this.fail('INVALID_GAME', 'Use a valid lowercase game ID.');
+      if (this.bridge) await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' });
+      this.selectedGameId = gameId; this.runtimePublished = false; this.sessionId = randomUUID();
+      this.activity = { jobId: randomUUID(), gameId, title: title.slice(0, 120), prompt: prompt.slice(0, 4000), stage: 'planning', message: '', events: [], updatedAt: new Date().toISOString() };
+      this.progress('planning', 'Creation requested through MCP. Preparing the workspace.');
+      this.state = 'starting';
+      try {
+        await this.ensureServers(signal); await this.showStudio(open);
+        this.progress('authoring', 'Waiting for the coding agent to write the game.');
+        return this.success();
+      } catch (error) { return this.failedAction(error, signal, 'LAUNCH_FAILED'); }
+    });
+  }
+
+  updateCreation(gameId: string, stage: 'planning' | 'authoring' | 'testing' | 'error', message: string): LifecycleResult {
+    if (!this.activity || this.activity.gameId !== gameId) return this.fail('INVALID_GAME', 'Call begin_game_creation for this game first.');
+    if (this.action || this.stopping || this.runtimePublished) return this.fail('LIFECYCLE_BUSY', 'Source progress is only accepted before launch.');
+    this.progress(stage, message); return this.success();
+  }
 
   getStatus(): RuntimeLifecycleStatus {
     const presence = this.bridge?.runtimeStatus;
@@ -72,48 +109,44 @@ export class RuntimeLifecycleManager {
       runtimeId: matching ? presence.runtimeId : undefined,
       url: this.url, message: matching && presence.message ? presence.message : this.message,
       diagnostics: [...this.diagnostics], ownsServers: Boolean(this.bridge || this.devServer),
+      activity: this.getActivity(),
     };
   }
 
   selectGame(gameId: string): LifecycleResult {
     if (this.action || this.stopping) return this.fail('LIFECYCLE_BUSY', 'Wait for the current lifecycle action or stop it first.');
-    if (!gameCatalog.some((game) => game.id === gameId)) return this.fail('INVALID_GAME', `Unknown game "${gameId}". Call list_games for registered games.`);
+    if (!this.listGames().some((game) => game.id === gameId)) return this.fail('INVALID_GAME', `Unknown game "${gameId}". Call list_games for registered games.`);
     if (this.bridge && gameId !== this.selectedGameId) return this.fail('LIFECYCLE_BUSY', 'Stop the current game before selecting another, or call launch_game with its gameId.');
     this.selectedGameId = gameId;
     return this.success();
   }
 
   launchGame(gameId = this.selectedGameId, open = true): Promise<LifecycleResult> {
-    if (!gameCatalog.some((game) => game.id === gameId)) return Promise.resolve(this.fail('INVALID_GAME', `Unknown game "${gameId}".`));
+    try { if (!this.listGames().some((game) => game.id === gameId)) { this.progress('error', `Unknown game "${gameId}". Register it in the manifest before launch.`); return Promise.resolve(this.fail('INVALID_GAME', `Unknown game "${gameId}". Register it in the manifest before launch.`)); } }
+    catch (error) { this.progress('error', this.errorMessage(error)); return Promise.resolve(this.fail('INVALID_GAME', this.errorMessage(error))); }
     return this.run(async (signal) => {
       if (this.bridge && this.devServer && gameId === this.selectedGameId && this.getStatus().state === 'ready') return this.success();
-      await this.release();
+      if (this.bridge) await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' });
       this.selectedGameId = gameId;
+      this.runtimePublished = false;
+      this.sessionId = randomUUID();
+      if (!this.activity || this.activity.gameId !== gameId || this.activity.stage === 'ready' || this.activity.stage === 'stopped') {
+        this.activity = { jobId: randomUUID(), gameId, title: this.listGames().find((g) => g.id === gameId)?.title ?? gameId, prompt: '', stage: 'planning', message: '', events: [], updatedAt: new Date().toISOString() };
+      }
       this.diagnostics.length = 0;
       this.state = 'starting'; this.message = 'Validating game source.';
       try {
+        await this.ensureServers(signal);
+        await this.showStudio(open);
+        this.progress('validating', 'Type-checking and building the game source.');
         await (this.options.validateSource ?? validateSource)(this.root, signal);
         signal.throwIfAborted();
-        this.sessionId = randomUUID();
-        this.bridge = new RuntimeBridgeServer({
-          port: this.options.bridgePort ?? Number(process.env.BRIDGE_PORT ?? 8787),
-          token: this.options.token, log: (message) => this.diagnostic(message),
-          acceptRuntime: (identity) => this.acceptRuntime(identity),
-          // The managed Vite address is fixed to loopback; Node clients may omit Origin.
-          allowedOrigins: [`http://127.0.0.1:${this.vitePort}`],
-        });
-        await this.bridge.ready;
-        signal.throwIfAborted();
-        this.devServer = await (this.options.startDevServer?.(this.bridge.port, (message) => this.diagnostic(message)) ?? this.startVite(this.bridge.port));
-        signal.throwIfAborted();
-        this.url = this.gameUrl();
+        this.runtimePublished = true;
         this.state = 'waiting'; this.message = 'Waiting for browser game initialization.';
-        if (open) {
-          try { await (this.options.openBrowser ?? openBrowser)(this.url); }
-          catch (error) { this.diagnostic(this.errorMessage(error)); }
-        }
+        this.progress('loading', 'Build passed. Loading the game into the studio preview.');
         await this.waitUntilReady(signal);
         this.state = 'ready'; this.message = undefined;
+        this.progress('ready', 'Game initialized. Ready to play in the preview.');
         return this.success();
       } catch (error) {
         return this.failedAction(error, signal, 'LAUNCH_FAILED');
@@ -125,6 +158,7 @@ export class RuntimeLifecycleManager {
     return this.run(async (signal) => {
       if (!this.bridge || !this.devServer) return this.fail('NOT_RUNNING', 'Launch a managed game before reloading.');
       try {
+        this.progress('validating', 'Validating edited source. The previous game remains available.');
         await (this.options.validateSource ?? validateSource)(this.root, signal);
         signal.throwIfAborted();
         const previousSession = this.sessionId;
@@ -135,13 +169,17 @@ export class RuntimeLifecycleManager {
           return this.fail('NOT_RUNNING', 'The browser disconnected. Stop and launch the game again.');
         }
         this.url = url; this.state = 'waiting'; this.message = 'Waiting for the reloaded document.';
+        this.url = this.studioUrl(); this.runtimePublished = true;
+        this.progress('loading', 'Loading the rebuilt game into the preview.');
         await this.waitUntilReady(signal);
         this.state = 'ready'; this.message = undefined;
+        this.progress('ready', 'Reload complete. Ready to play.');
         return this.success();
       } catch (error) {
         // Compilation failure leaves the currently running game available for inspection.
         if (this.getStatus().state === 'ready' && !signal.aborted) {
           this.diagnostic(this.errorMessage(error));
+          this.progress('error', this.errorMessage(error));
           return this.fail('RELOAD_FAILED', this.errorMessage(error));
         }
         return this.failedAction(error, signal, 'RELOAD_FAILED');
@@ -157,6 +195,7 @@ export class RuntimeLifecycleManager {
       try {
         await this.release();
         this.state = 'stopped'; this.message = undefined;
+        this.progress('stopped', 'The agent stopped the managed game.');
         return this.success();
       } catch (error) {
         this.state = 'error';
@@ -184,7 +223,28 @@ export class RuntimeLifecycleManager {
     const url = new URL('/', this.devServer!.url);
     url.searchParams.set('game', this.selectedGameId);
     url.searchParams.set('session', this.sessionId!);
+    url.searchParams.set('embedded', '1');
     return url.href;
+  }
+
+  private studioUrl(): string { const url = new URL(this.gameUrl()); url.searchParams.delete('embedded'); url.searchParams.set('studio', '1'); return url.href; }
+  private progress(stage: AgentActivity['stage'], message: string): void {
+    if (!this.activity) return;
+    const timestamp = new Date().toISOString();
+    this.activity = { ...this.activity, stage, message: message.slice(-4000), updatedAt: timestamp,
+      events: [...this.activity.events, { stage, message: message.slice(-4000), timestamp }].slice(-30) };
+  }
+  private async ensureServers(signal: AbortSignal): Promise<void> {
+    if (!this.bridge) this.bridge = new RuntimeBridgeServer({ port: this.options.bridgePort ?? Number(process.env.BRIDGE_PORT ?? 8787), token: this.options.token,
+      log: (message) => this.diagnostic(message), acceptRuntime: (identity) => this.acceptRuntime(identity), allowedOrigins: [`http://127.0.0.1:${this.vitePort}`], getStudioActivity: () => this.getActivity() });
+    await this.bridge.ready; signal.throwIfAborted();
+    this.devServer ??= await (this.options.startDevServer?.(this.bridge.port, (message) => this.diagnostic(message)) ?? this.startVite(this.bridge.port));
+    signal.throwIfAborted(); this.url = this.studioUrl();
+  }
+  private async showStudio(open: boolean): Promise<void> {
+    if (!open || this.studioOpened) return;
+    try { await (this.options.openBrowser ?? openBrowser)(this.url!); this.studioOpened = true; }
+    catch (error) { this.diagnostic(this.errorMessage(error)); }
   }
 
   private async waitUntilReady(signal: AbortSignal): Promise<void> {
@@ -220,11 +280,15 @@ export class RuntimeLifecycleManager {
     });
     try { await server.listen(); }
     catch (error) { await server.close(); throw error; }
+    server.watcher.on('all', (_event, path) => {
+      if (this.activity && ['planning', 'authoring', 'testing'].includes(this.activity.stage) && path.replaceAll('\\', '/').includes(`/src/games/${this.selectedGameId}/`)) this.progress('authoring', `Source updated: ${path.split('/').pop()}.`);
+    });
     return { url: `http://127.0.0.1:${this.vitePort}`, close: () => server.close() };
   }
 
   private async release(): Promise<void> {
     this.sessionId = undefined;
+    this.runtimePublished = false; this.studioOpened = false;
     if (this.bridge && !(await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' }))) {
       this.diagnostic('Browser teardown could not be confirmed. Close any disconnected game tab; owned servers will still be released.');
     }
@@ -239,7 +303,11 @@ export class RuntimeLifecycleManager {
   private async failedAction(error: unknown, signal: AbortSignal, fallback: 'LAUNCH_FAILED' | 'RELOAD_FAILED'): Promise<LifecycleResult> {
     const message = signal.aborted ? 'Lifecycle operation cancelled.' : this.errorMessage(error);
     this.diagnostic(message);
-    try { await this.release(); } catch (cleanup) { this.diagnostic(`Cleanup failed: ${this.errorMessage(cleanup)}`); }
+    this.progress('error', message);
+    // Keep a successfully opened studio alive so the user can see failures and agent repairs.
+    if (signal.aborted || !this.bridge || !this.devServer) {
+      try { await this.release(); } catch (cleanup) { this.diagnostic(`Cleanup failed: ${this.errorMessage(cleanup)}`); }
+    }
     this.state = signal.aborted ? 'stopped' : 'error'; this.message = message;
     return this.fail(signal.aborted ? 'CANCELLED' : error instanceof LifecycleFailure ? error.code : fallback, message);
   }
