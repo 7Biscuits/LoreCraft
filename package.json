@@ -9,7 +9,7 @@
     "mcp": "tsx src/mcp/server.ts",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts",
+    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

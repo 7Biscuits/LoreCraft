@@ -1,5 +1,13 @@
 # Lorecraft
 
+## Authoring games
+
+Source-authored games live in `src/games/<game-id>/`. Each module implements the small `GameModule` contract in `src/games/contract.ts`: `init`, `update`, `render`, `reset`, and `destroy`. The shared host in `src/games/host.ts` owns the one LittleJS lifecycle, entity registry, runtime adapter, WebSocket bridge integration, and MCP-visible game state.
+
+To author a game, create a directory such as `src/games/my-game/`, export a `GameModule`, and select it in `src/games/catalog.ts`. Use the supplied `GameContext` to create registry-backed entities and retrieve their live LittleJS objects for game-specific rules. Run `pnpm typecheck` and `pnpm build` to validate it. The included `maze-escape` example uses a key-and-exit objective, a chasing enemy, win/loss states, and restart handling.
+
+Changing the active module requires Vite's normal reload today. Runtime selection/reload management is intentionally deferred to Step 6.
+
 ## Local game control
 
 Start the bridge and game in separate terminals:
