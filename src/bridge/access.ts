@@ -2,8 +2,12 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
-const tokenPath = fileURLToPath(new URL('../../.lorecraft/bridge-token', import.meta.url));
+const checkout = fileURLToPath(new URL('../../', import.meta.url));
+const tokenPath = join(homedir(), '.local', 'share', 'lorecraft', createHash('sha256').update(checkout).digest('hex').slice(0, 16), 'bridge-token');
 
 /** Only Node processes read this file. The browser connects through Vite's proxy. */
 export function readBridgeToken(path = process.env.LORECRAFT_BRIDGE_TOKEN_FILE ?? tokenPath): string {

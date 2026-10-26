@@ -9,6 +9,7 @@ export const bridgeOperations = [
   'deleteEntity',
   'getGameState',
   'resetGame',
+  'captureScreenshot', 'pauseGame', 'resumeGame', 'stepGame', 'simulateInput', 'getRuntimeLogs', 'runGameplayTest',
 ] as const;
 
 export type BridgeOperation = typeof bridgeOperations[number];
@@ -38,7 +39,10 @@ export interface RuntimeControl {
   kind: 'control';
   action: 'navigate' | 'stop';
   url?: string;
+  controlId?: string;
 }
+
+export interface ControlAck { kind: 'controlAck'; controlId: string }
 
 export interface BridgeHello {
   kind: 'hello';
@@ -66,7 +70,7 @@ export interface BridgeError {
   message: string;
 }
 
-export type BridgeMessage = BridgeHello | BridgeRequest | BridgeResponse | RuntimeStatus | RuntimeControl;
+export type BridgeMessage = BridgeHello | BridgeRequest | BridgeResponse | RuntimeStatus | RuntimeControl | ControlAck;
 
 export type BridgeApiResult = ApiResult<unknown>;
 
@@ -93,8 +97,9 @@ export function parseBridgeMessage(raw: unknown): BridgeMessage | BridgeError {
     if ((raw.action !== 'navigate' && raw.action !== 'stop') || (raw.action === 'navigate' && (typeof raw.url !== 'string' || raw.url.length > 2048))) {
       return bridgeError('MALFORMED_MESSAGE', 'Invalid runtime control.');
     }
-    return { kind: 'control', action: raw.action, url: raw.url as string | undefined };
+    return { kind: 'control', action: raw.action, url: raw.url as string | undefined, ...(isRequestId(raw.controlId) ? { controlId: raw.controlId } : {}) };
   }
+  if (raw.kind === 'controlAck' && isRequestId(raw.controlId)) return { kind: 'controlAck', controlId: raw.controlId };
   if (raw.kind === 'request') {
     if (!isRequestId(raw.requestId)) return bridgeError('MALFORMED_MESSAGE', 'request.requestId must be a non-empty string.');
     if (!isOperation(raw.operation)) return bridgeError('UNSUPPORTED_OPERATION', `Unsupported operation "${String(raw.operation)}".`);
@@ -108,6 +113,8 @@ export function parseBridgeMessage(raw: unknown): BridgeMessage | BridgeError {
     if (!isRequestId(raw.requestId) || typeof raw.ok !== 'boolean') {
       return bridgeError('MALFORMED_MESSAGE', 'response must include a non-empty requestId and boolean ok.');
     }
+    if (!raw.ok && (!isObject(raw.error) || typeof raw.error.code !== 'string' || !raw.error.code || typeof raw.error.message !== 'string')) return bridgeError('MALFORMED_MESSAGE', 'Error responses require code and message strings.');
+    if (raw.ok && !('result' in raw)) return bridgeError('MALFORMED_MESSAGE', 'Successful responses require a result.');
     return { kind: 'response', requestId: raw.requestId, ok: raw.ok, result: raw.result, error: isObject(raw.error) ? raw.error as unknown as BridgeError : undefined };
   }
   return bridgeError('MALFORMED_MESSAGE', `Unsupported message kind "${raw.kind}".`);
@@ -141,10 +148,21 @@ export function dispatchRuntimeOperation(operation: BridgeOperation, args: Recor
     case 'deleteEntity': return runtime.deleteEntity(args.id as string);
     case 'getGameState': return runtime.getGameState();
     case 'resetGame': return runtime.resetGame();
+    default: {
+      const extension = runtime[operation];
+      return extension ? extension.call(runtime, args) : { ok: false, error: { code: 'OPERATION_FAILED', message: `Runtime does not support ${operation}.` } };
+    }
   }
 }
 
 export interface RuntimeOperations {
+  captureScreenshot?(args: Record<string, unknown>): BridgeApiResult;
+  pauseGame?(args: Record<string, unknown>): BridgeApiResult;
+  resumeGame?(args: Record<string, unknown>): BridgeApiResult;
+  stepGame?(args: Record<string, unknown>): BridgeApiResult;
+  simulateInput?(args: Record<string, unknown>): BridgeApiResult;
+  getRuntimeLogs?(args: Record<string, unknown>): BridgeApiResult;
+  runGameplayTest?(args: Record<string, unknown>): BridgeApiResult;
   createEntity(args: CreateEntityArgs): BridgeApiResult;
   getEntity(id: string): BridgeApiResult;
   listEntities(): BridgeApiResult;
@@ -177,5 +195,8 @@ function hasRequiredArguments(operation: BridgeOperation, args: Record<string, u
     case 'listEntities':
     case 'getGameState':
     case 'resetGame': return true;
+    case 'stepGame': return 'frames' in args;
+    case 'simulateInput': return 'x' in args && 'y' in args && 'frames' in args;
+    case 'captureScreenshot': case 'pauseGame': case 'resumeGame': case 'getRuntimeLogs': case 'runGameplayTest': return true;
   }
 }

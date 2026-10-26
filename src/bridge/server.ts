@@ -5,6 +5,7 @@ import type { Socket } from 'node:net';
 import { defaultBridgeOrigins, hasBridgeAccess, loadOrCreateBridgeToken } from './access';
 import { bridgeCloseCodes, bridgeError, errorResponse, parseBridgeMessage } from './protocol';
 import type { BridgeError, BridgeHello, BridgeRequest, BridgeResponse, RuntimeControl, RuntimeIdentity, RuntimePresence } from './protocol';
+import { randomUUID } from 'node:crypto';
 
 export interface BridgeServerOptions {
   port?: number;
@@ -15,6 +16,7 @@ export interface BridgeServerOptions {
   log?: (message: string) => void;
   acceptRuntime?: (identity: RuntimeIdentity | undefined) => boolean;
   onRuntimeChange?: (presence: RuntimePresence | undefined) => void;
+  heartbeatIntervalMs?: number;
 }
 
 type ClientRole = 'runtime' | 'client' | undefined;
@@ -34,6 +36,9 @@ export class RuntimeBridgeServer {
   private readonly shutdownTimeoutMs: number;
   private closing = false;
   private closePromise?: Promise<void>;
+  private readonly alive = new WeakMap<WebSocket, boolean>();
+  private heartbeat?: ReturnType<typeof setInterval>;
+  private readonly controls = new Map<string, { socket: WebSocket; resolve: (acknowledged: boolean) => void }>();
   readonly ready: Promise<void>;
 
   constructor(private readonly options: BridgeServerOptions = {}) {
@@ -45,7 +50,7 @@ export class RuntimeBridgeServer {
     const origins = new Set(options.allowedOrigins ?? defaultBridgeOrigins);
     this.server = new WebSocketServer({
       server: this.httpServer,
-      perMessageDeflate: false, maxPayload: 64 * 1024,
+      perMessageDeflate: false, maxPayload: 4 * 1024 * 1024,
       verifyClient: ({ origin, req }, done) => {
         const authorized = !this.closing && hasBridgeAccess(req.headers.authorization, token);
         const allowedOrigin = origin === undefined || origins.has(origin);
@@ -64,6 +69,13 @@ export class RuntimeBridgeServer {
       socket.once('close', () => this.connections.delete(socket));
     });
     this.httpServer.listen(options.port ?? 8787, '127.0.0.1');
+    this.heartbeat = setInterval(() => {
+      for (const socket of this.server.clients) {
+        if (!this.alive.get(socket)) { socket.terminate(); continue; }
+        this.alive.set(socket, false); socket.ping();
+      }
+    }, options.heartbeatIntervalMs ?? 15000);
+    this.heartbeat.unref();
   }
 
   get port(): number {
@@ -86,9 +98,22 @@ export class RuntimeBridgeServer {
     return true;
   }
 
+  async controlRuntimeAcknowledged(control: RuntimeControl, timeoutMs = 750): Promise<boolean> {
+    const socket = this.runtime;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const controlId = randomUUID();
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => { this.controls.delete(controlId); resolve(false); }, timeoutMs);
+      this.controls.set(controlId, { socket, resolve: (ack) => { clearTimeout(timer); this.controls.delete(controlId); resolve(ack); } });
+      if (!this.controlRuntime({ ...control, controlId })) { clearTimeout(timer); this.controls.delete(controlId); resolve(false); }
+    });
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    clearInterval(this.heartbeat);
+    for (const control of this.controls.values()) control.resolve(false);
     this.failPending('Runtime bridge server closed.');
     this.closePromise = this.ready.then(() => new Promise<void>((resolve, reject) => {
       const deadline = setTimeout(() => {
@@ -112,6 +137,8 @@ export class RuntimeBridgeServer {
   private attach(socket: WebSocket): void {
     if (this.closing) { socket.close(1001); return; }
     this.roles.set(socket, undefined);
+    this.alive.set(socket, true);
+    socket.on('pong', () => this.alive.set(socket, true));
     socket.on('message', (data, isBinary) => {
       if (isBinary) return this.reject(socket, '', bridgeError('MALFORMED_MESSAGE', 'Binary messages are not supported.'));
       this.handleMessage(socket, data.toString());
@@ -133,6 +160,7 @@ export class RuntimeBridgeServer {
       return;
     }
     if (message.kind === 'hello') return this.registerRole(socket, message);
+    if (message.kind === 'controlAck') { const pending = this.controls.get(message.controlId); if (pending?.socket === socket) pending.resolve(true); return; }
     if (message.kind === 'request') return this.forwardRequest(socket, message);
     if (message.kind === 'response') return this.forwardResponse(socket, message);
     if (message.kind === 'runtimeStatus' && socket === this.runtime && this.presence) {
@@ -193,6 +221,7 @@ export class RuntimeBridgeServer {
   }
 
   private handleClose(socket: WebSocket): void {
+    for (const control of this.controls.values()) if (control.socket === socket) control.resolve(false);
     const role = this.roles.get(socket);
     this.roles.delete(socket);
     if (role === 'runtime' && this.runtime === socket) {

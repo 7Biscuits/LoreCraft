@@ -27,6 +27,8 @@ test('a gameplay update failure reports its cause and disposes the game once', a
     engineStep();
     assert.equal(updates, 1);
     assert.equal(runtime.resetGame().ok, false);
+    assert.equal(runtime.createEntity({ id: 'late', type: 'coin', dimension: '2d', position: { x: 0, y: 0 } }).ok, false);
+    await assert.rejects(host.start(), /destroyed/);
   } finally { host.destroy(); }
   assert.equal(destroyed, 1);
 });

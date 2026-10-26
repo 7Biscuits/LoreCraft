@@ -12,6 +12,8 @@ import {
   setCameraScale,
   setCanvasClearColor,
   setEngineVariableStep,
+  setEngineManualStep,
+  engineStep,
   timeDelta,
   vec2,
   vec3,
@@ -27,6 +29,7 @@ const colors: Record<EntityType, Color> = {
   enemy: new Color(0.9, 0.33, 0.38),
   obstacle: new Color(0.32, 0.41, 0.55),
 };
+let engineClaimed = false;
 
 class RuntimeRectangle extends EngineObject {
   constructor(pos: ReturnType<typeof vec2>, size: ReturnType<typeof vec2>, color: Color) {
@@ -43,7 +46,10 @@ export class AuthoredGameHost {
   private startPromise?: Promise<GameRuntime>;
   private renderer3DReady = false;
   private destroyed = false;
+  private destroying = false;
   private failure?: unknown;
+  private paused = false;
+  private input?: { x: number; y: number };
   private readonly registry = new EntityRegistry();
   readonly runtime: GameRuntime;
   private readonly context: GameContext;
@@ -52,6 +58,7 @@ export class AuthoredGameHost {
     const validation = validateGameModule(game);
     if (!validation.ok) throw new Error(`Invalid game module: ${validation.errors.join(' ')}`);
     this.runtime = new GameRuntime(this.registry, {
+      isDisposed: () => this.destroyed || this.destroying,
       createEntity: (args) => this.createRuntimeEntity(args),
       getGameState: () => ({ mode: game.id, score: this.score, state: game.getState?.() ?? {} }),
       resetGame: () => this.reset(),
@@ -70,11 +77,14 @@ export class AuthoredGameHost {
   }
 
   start(): Promise<GameRuntime> {
+    if (this.destroyed) return Promise.reject(new Error('The game host has been destroyed.'));
     if (this.startPromise) return this.startPromise;
+    if (engineClaimed) return Promise.reject(new Error('LittleJS already has a host in this document. Reload the document to launch another game.'));
+    engineClaimed = true;
     this.startPromise = engineInit(
       () => this.init(),
       () => {
-        this.guard(() => this.game.update({ deltaSeconds: timeDelta, movement: keyDirection(), restart: keyWasPressed('KeyR') }));
+        this.guard(() => this.game.update({ deltaSeconds: timeDelta, movement: this.input ?? keyDirection(), restart: keyWasPressed('KeyR') }));
       },
       undefined,
       () => this.guard(() => this.game.render()),
@@ -86,12 +96,24 @@ export class AuthoredGameHost {
   }
 
   destroy(): void {
-    if (this.destroyed) return;
-    this.destroyed = true;
+    if (this.destroyed || this.destroying) return;
+    this.destroying = true;
+    // Stop scheduling before callbacks or entities are disposed.
+    setEngineManualStep(true);
     this.initialized = false;
     try { this.game.destroy(); }
-    finally { this.clearEntities(); }
+    finally { try { this.clearEntities(); } finally { this.destroyed = true; this.destroying = false; } }
   }
+
+  pause(): void { if (!this.destroyed) { this.paused = true; setEngineManualStep(true); } }
+  resume(): void { if (!this.destroyed && this.paused) { this.paused = false; setEngineManualStep(false); } }
+  step(frames: number): void {
+    if (this.destroyed) throw new Error('The game host has been destroyed.');
+    if (!Number.isInteger(frames) || frames < 1 || frames > 600) throw new Error('frames must be an integer from 1 to 600.');
+    this.pause(); engineStep(frames);
+  }
+  setInput(movement?: { x: number; y: number }): void { this.input = movement; }
+  get isPaused(): boolean { return this.paused; }
 
   private guard(callback: () => void): void {
     if (!this.initialized) return;
@@ -106,6 +128,7 @@ export class AuthoredGameHost {
   }
 
   private init(): void {
+    if (this.destroyed) throw new Error('The game stopped before initialization.');
     setEngineVariableStep(true);
     setCameraPos(vec2());
     setCameraScale(48);
@@ -128,7 +151,7 @@ export class AuthoredGameHost {
   }
 
   private clearEntities(): void {
-    for (const entity of this.registry.list()) this.runtime.deleteEntity(entity.id);
+    for (const entity of this.registry.list()) { this.registry.remove(entity.id); entity.destroy(); }
   }
 
   private createRuntimeEntity(args: CreateEntityArgs): ApiResult<ManagedEntity> {

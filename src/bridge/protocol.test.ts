@@ -41,3 +41,8 @@ test('validates lifecycle identity, status, and control messages', () => {
     assert.equal('code' in result && result.code, 'MALFORMED_MESSAGE');
   }
 });
+test('rejects malformed response envelopes rather than accepting unstructured errors', () => {
+  assert.equal('code' in parseBridgeMessage({ kind: 'response', requestId: 'a', ok: false, error: { unexpected: true } }), true);
+  assert.equal('code' in parseBridgeMessage({ kind: 'response', requestId: 'a', ok: true }), true);
+  assert.equal('code' in parseBridgeMessage({ kind: 'response', requestId: 'a', ok: false, error: { code: 'OPERATION_FAILED', message: 'failed' } }), false);
+});

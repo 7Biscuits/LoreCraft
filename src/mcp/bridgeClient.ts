@@ -133,8 +133,9 @@ export class GameBridgeClient {
   }
 }
 
-function connectionError(cause: unknown): { code: 'BRIDGE_CONNECTION_FAILED'; message: string } {
+function connectionError(cause: unknown): { code: 'BRIDGE_CONNECTION_FAILED' | 'REQUEST_TIMEOUT'; message: string } {
   const detail = cause instanceof Error ? cause.message : 'unknown connection error';
+  if (/opening handshake has timed out/i.test(detail)) return { code: 'REQUEST_TIMEOUT', message: 'The bridge WebSocket handshake exceeded the request deadline.' };
   return { code: 'BRIDGE_CONNECTION_FAILED', message: `Unable to connect to the game bridge: ${detail}` };
 }
 

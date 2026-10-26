@@ -98,3 +98,18 @@ test('reset rebuilds the registry without leaving active orphaned LittleJS objec
   assert.equal(engineObjects.filter((object) => !object.destroyed).length, 7);
   assert.equal(runtime.getEntity('temporary').ok, false);
 });
+
+test('high-speed movement cannot tunnel through initial walls', () => {
+  runtime.deleteEntity('enemy-1');
+  runtime.setEntityPosition('player-1', { x: -4, y: -4 });
+  runtime.setEntityProperties('player-1', { speed: 120 });
+  game.update({ ...frame, movement: { x: 1, y: 0 } });
+  assert.equal(entity('player-1').position.x, -4);
+});
+
+test('deleting the controlling player enters a loss and restart recovers the scene', () => {
+  runtime.deleteEntity('player-1'); game.update(frame);
+  assert.equal(game.getState().outcome, 'lost');
+  game.update({ ...frame, restart: true });
+  assert.equal(game.getState().outcome, 'playing'); assert.equal(runtime.getEntity('player-1').ok, true);
+});

@@ -104,3 +104,13 @@ test('deletion destroys the object and removes its registry entry', () => {
   assert.equal(missing.ok, false);
   if (!missing.ok) assert.equal(missing.error.code, 'ENTITY_NOT_FOUND');
 });
+
+test('rejects zero and negative extents, malformed properties, and blank deletion IDs', () => {
+  const runtime = createTestRuntime();
+  runtime.createEntity({ id: 'player-1', type: 'player', dimension: '2d', position: { x: 0, y: 0 } });
+  for (const size of [{ x: 0, y: 1 }, { x: 1, y: -1 }]) {
+    const result = runtime.setEntityProperties('player-1', { size });
+    assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, 'INVALID_ARGUMENT');
+  }
+  const deletion = runtime.deleteEntity(''); assert.equal(deletion.ok, false); if (!deletion.ok) assert.equal(deletion.error.code, 'INVALID_ARGUMENT');
+});

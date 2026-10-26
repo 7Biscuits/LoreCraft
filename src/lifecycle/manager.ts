@@ -225,7 +225,9 @@ export class RuntimeLifecycleManager {
 
   private async release(): Promise<void> {
     this.sessionId = undefined;
-    this.bridge?.controlRuntime({ kind: 'control', action: 'stop' });
+    if (this.bridge && !(await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' }))) {
+      this.diagnostic('Browser teardown could not be confirmed. Close any disconnected game tab; owned servers will still be released.');
+    }
     const bridge = this.bridge; const devServer = this.devServer;
     const results = await Promise.allSettled([devServer?.close(), bridge?.close()]);
     if (results[0]?.status === 'fulfilled') this.devServer = undefined;

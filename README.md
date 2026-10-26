@@ -1,77 +1,141 @@
-# Lorecraft
+# LoreCraft
 
-## Authoring games
+**A little lore. A whole world.** A local-first game creation studio: describe a game, play it, refine it, inspect live entities, run gameplay checks, and export a single offline HTML file.
 
-Source-authored games live in `src/games/<game-id>/`. Each module implements the small `GameModule` contract in `src/games/contract.ts`: `init`, `update`, `render`, `reset`, and `destroy`. The shared host in `src/games/host.ts` owns the one LittleJS lifecycle, entity registry, and runtime adapter. Startup is asynchronous; the browser bridge connects after initialization succeeds. The host calls `destroy()` when disposed and cleans up registered entities.
+## Run the application
 
-`update(frame)` receives elapsed seconds, a movement vector, and a restart flag. The host samples LittleJS input once (including its built-in WASD mapping); gameplay tests supply explicit frames. The optional `getState()` hook returns JSON-compatible game details under `get_game_state.result.state`. Maze Escape exposes `hasKey` and `outcome` (`playing`, `won`, or `lost`).
-
-To author a game, create a directory such as `src/games/my-game/`, export a `GameModule`, and register its id, title, entry (`./my-game/index.ts`), and export name in `src/games/manifest.ts`. Keep game initialization, rules, objectives, and optional JSON state in the game module; store level configuration and assets alongside it. The browser loader checks the exported contract and matching game ID. Node reads only manifest metadata. Restart the MCP server after adding or removing manifest entries so its game list updates.
-
-Use the supplied `GameContext` to create registry-backed entities and retrieve their live LittleJS objects for game-specific rules. Run `pnpm typecheck` and `pnpm build` to validate source. The included `maze-escape` example uses a key-and-exit objective, a chasing enemy, win/loss states, and restart handling.
-
-Maze Escape uses live registry entities for obstacles, enemies, and collectibles. Creating, moving, resizing, or deleting an obstacle changes collision behavior immediately. Enemy movement reads its inspected speed, including zero. Initial walls are ordinary obstacle entities named `wall-1` through `wall-4`. The keyboard controls `player-1`; collecting any coin unlocks the gate. Reset reconstructs the initial scene.
-
-## Managed runtime workflow (Antigravity)
-
-Install locked dependencies with `pnpm install --frozen-lockfile`, then run `pnpm setup:mcp` and reload the workspace MCP server in Antigravity. The generated configuration allows 90 seconds for lifecycle tools (source builds are bounded to 60 seconds, browser readiness to 15 seconds). Antigravity starts `pnpm mcp` over stdio. Keep stdout reserved for MCP messages.
-
-For managed operation, the MCP process starts and owns the existing bridge and a programmatic Vite development server. Stop manually launched `pnpm bridge`/`pnpm dev` processes before using `launch_game`; occupied ports produce a structured failure. The manager never adopts or terminates an unrelated server. It uses the project's Vite configuration and the same authenticated WebSocket proxy as manual development. No additional server process or shell interface is exposed.
-
-The lifecycle tools are:
-
-| Tool | Input | Behavior |
-| --- | --- | --- |
-| `list_games` | `{}` | List registered game IDs and titles. |
-| `select_game` | `{ "gameId": "maze-escape" }` | Choose a game before launching. Stop a different running game first. |
-| `launch_game` | `{ "gameId": "maze-escape", "openBrowser": true }` (both optional) | Run `pnpm build`, start owned servers, open the default browser, and wait for the selected session to report ready. A repeated launch of the same ready game is idempotent. A different ID replaces the managed game. |
-| `get_runtime_status` | `{}` | Inspect selection, launch URL, session/runtime IDs, readiness, bounded diagnostics, and resource ownership. Available during launch. |
-| `reload_game` | `{}` | Validate source, navigate the managed tab into a new document/session, and wait for readiness. Gameplay resets. |
-| `stop_game` | `{}` | Cancel pending launch/build, unload the managed game document, and close owned Vite/bridge servers. Safe to repeat. |
-
-Call `list_games`, optionally `select_game`, then `launch_game`. Once ready, use the eight existing entity/game tools. For example, create a coin with `create_entity`, inspect it with `get_entity`, move it with `set_entity_position`, and remove it with `delete_entity`. Edit game source, call `reload_game`, inspect state again, then call `stop_game` when finished. A controlled document reload starts LittleJS from scratch; engine initialization is never repeated in place.
-
-If automatic browser opening fails, diagnostics contain the failure and `get_runtime_status` provides the URL to open manually. `openBrowser: false` supports clients that manage their own browser: issue launch asynchronously, read its URL with `get_runtime_status`, and open that URL before the readiness deadline. A missing browser produces `RUNTIME_TIMEOUT`; import/initialization/update/render failures report `RUNTIME_ERROR` or an error status with a message. Failed launches clean up their servers. A compile failure during reload keeps the existing session available when it is still healthy. An unexpected browser disconnection changes status to `waiting`; its ordinary bridge reconnection restores readiness. A rejected old session stays disconnected.
-
-Stopping or closing MCP releases owned listeners and cancels its fixed build command (including the process group on macOS/Linux). Stop navigates the controlled game document to a blank page. Use only one managed MCP process per port pair. `LORECRAFT_VITE_PORT` changes the managed Vite port; `BRIDGE_PORT` changes its relay port. When changing the relay port, set `MCP_BRIDGE_URL` to the same address in the generated MCP configuration. Launch errors such as `EADDRINUSE` include diagnostics and never kill the existing listener.
-
-Lifecycle operations return `{ ok: true, result: RuntimeLifecycleStatus }` or `{ ok: false, error: { code, message }, status }`. Status includes `state`, `selectedGameId`, `sessionId`, `runtimeId`, `url`, `message`, `diagnostics`, and `ownsServers`. Source validation executes only the fixed repository build command in this checkout. Game IDs are selected from the manifest; tools accept no commands, source code, filesystem paths, or arbitrary navigation targets.
-
-## Local game control
-
-After cloning or moving the checkout, generate the workspace MCP configuration:
-
-```bash
-pnpm setup:mcp
+```sh
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
-The script derives the absolute working directory from its own location and preserves other MCP servers and environment overrides. The generated `.agents/mcp_config.json` stays local and is excluded from Git. Run the script again after relocating the checkout.
+Open **http://127.0.0.1:5173/**. The studio and its playable preview run with this one command. A relay, MCP client, account, API key, and database are not required for the app.
 
-Start the bridge and game in separate terminals:
+Start with a sample prompt or try:
 
-```bash
+> A cozy forest adventure with 6 crystals, 2 forest spirits, and a portal home. Easy difficulty.
+
+Click **Create my game**, then **Enter the world**. WASD / arrows move, Shift dashes, Space boosts automatic fire in shooters, P pauses, and R restarts. Touch controls appear on touch devices. Keyboard input belongs to the game preview; click Play to focus it.
+
+See [DEMO.md](DEMO.md) for a short judge presentation and verification checklist.
+
+## Creation modes and supported games
+
+Local generation is a deterministic prompt compiler with four complete 2D rule sets:
+
+| Genre | Goal |
+| --- | --- |
+| Adventure | Collect every crystal, then enter the portal. |
+| Shooter | Clear the enemies with auto-aim, collect crystals, then reach the portal. |
+| Survival | Stay alive until the timer ends. |
+| Runner | Dodge scrolling enemies and survive the race timer. |
+
+Five procedural visual themes are included: forest, space, dungeon, ocean, and neon. Prompts can set enemy/collectible counts, difficulty, lives, and time limits. Refinements such as “make it faster”, “no enemies”, “5 lives”, or “change it to a space shooter” preserve unspecified settings and the seed.
+
+Local mode uses rules rather than a language model. Both modes produce validated game specifications for these supported mechanics; arbitrary 3D worlds or new mechanics require source authoring. The UI labels the active mode explicitly.
+
+### Optional AI generation
+
+Create a server-side `.env` based on `.env.example`:
+
+```dotenv
+OPENAI_API_KEY=your-key
+OPENAI_MODEL=gpt-4.1-mini
+```
+
+Restart `pnpm dev`, then select **AI generation** in the prompt composer. The server uses the OpenAI Responses API with structured output, bounded requests, schema validation, and one response-repair attempt. A bounded build/test/repair pass verifies the resulting scene before returning it. Provider failures are shown explicitly; they do not silently substitute local results.
+
+Credentials never enter browser storage, client bundles, project files, or exports. API requests reject other Origins, bound input size, and rate-limit generation. Real provider access requires a valid key and an available model. The integration is tested with simulated provider responses; it is not a guarantee of account access.
+
+The Vite API plugin supports both `pnpm dev` and `pnpm preview`. A purely static deployment retains local generation and exports; AI mode requires a server running this API. This is a single-device creator studio, not a multi-user hosted service.
+
+## Studio features
+
+- Live LittleJS preview with procedural pixel art, score, hearts, countdown, portal objectives, win/loss states, and optional synthesized sound effects.
+- Prompt-based creation and refinement, with each successful change stored as a revision.
+- Project library, revision restoration, JSON import/export, and automatic local saves. Up to 30 projects and 50 revisions per project are retained; export important projects as backups.
+- A live registry inspector for position, size, speed, creation, and deletion. Inspector edits affect the current run; Source edits create lasting design revisions.
+- Exact pause/frame stepping, runtime logs, PNG screenshots, and revision-specific gameplay checkpoints.
+- Ten deterministic gameplay checks: scene integrity, seed reproduction, movement, boundaries, objective reachability, swept collision, damage/loss, isolated victory, stability, and checkpoint/reset behavior. These are scenario checks, not proof that every design is fun or that a human can win under all hazards.
+- Editable, validated JSON game specifications. Rejected edits preserve the current game.
+- One-file HTML export with the same simulation and renderer, keyboard/touch controls, and no network or bridge dependency. Double-click the downloaded HTML file to play.
+
+Projects and checkpoints live in this browser's localStorage. They are not cloud backups. JSON project exports contain prompts and design revisions; runtime checkpoints remain on the device.
+
+## Architecture
+
+`GameModule` defines `init(context)`, `update(frame)`, `render()`, `reset()`, `destroy()`, and optional `getState()`. `GameContext` exposes the registry/runtime and score operations. `AuthoredGameHost` owns the single LittleJS lifecycle in a document; starting a second host is rejected. Reload creates a fresh document. Disposal stops engine scheduling, destroys entities, and rejects subsequent runtime mutations.
+
+Generated scenes implement the same module contract. A portable deterministic simulation drives live registry-backed LittleJS entities and a shared Canvas renderer. The studio isolates each game revision in a same-origin iframe; its postMessage controls check both Origin and source window. Standalone HTML embeds that same portable simulation, without LittleJS or the relay.
+
+`GameRuntime` exposes structured CRUD, 2D/3D positions, sizes, speed, rotation, resets, and state snapshots over stable entity IDs. Maze Escape remains a source-authored reference game. Its obstacles are live entities, enemy speed reads the inspected value, swept movement prevents tunneling, and controlling-player deletion enters a recoverable loss.
+
+### Source authoring and scaffolding
+
+```sh
+pnpm scaffold my-game "a space shooter with 4 enemies"
+pnpm typecheck
+```
+
+The scaffolder creates `src/games/my-game/index.ts`, `config.ts`, and `assets/README.md`, then registers the module in `manifest.ts`. Existing IDs and unsafe paths are rejected. Keep each game's assets/configuration together; use relative asset imports. The browser loader validates the module contract and ID. Restart MCP after changing the static manifest.
+
+## MCP and managed runtime
+
+The web studio works independently of MCP. Agent control uses:
+
+**MCP stdio tools → GameBridgeClient → RuntimeBridgeServer → BrowserRuntimeBridge → GameRuntime**
+
+```sh
+pnpm setup:mcp
+pnpm mcp
+```
+
+`setup:mcp` generates a local `.agents/mcp_config.json`, deriving the checkout path and preserving other server settings. stdout remains reserved for MCP messages.
+
+Lifecycle tools are `list_games`, `select_game`, `launch_game`, `get_runtime_status`, `reload_game`, and `stop_game`. Launch validates with the fixed `pnpm build` command, starts owned Vite/relay servers, opens a browser, and waits for an identified ready session. Reload validates source and starts a fresh document/session. Stop cancels builds, stops owned listeners, and requests acknowledged browser disposal. Unconfirmed browser teardown is reported in diagnostics. Unrelated servers are never adopted or killed.
+
+Stop an existing `pnpm dev` before using managed launch on the same port. The studio preview may be connected to a manually launched relay through **Inspector → Connect MCP**, then controlled with `pnpm mcp`.
+
+Baseline tools: `create_entity`, `get_entity`, `list_entities`, `set_entity_position`, `set_entity_properties`, `delete_entity`, `get_game_state`, `reset_game`.
+
+Inspection tools: `pause_game`, `resume_game`, `step_game`, `simulate_input`, `capture_screenshot`, `get_runtime_logs`, `run_gameplay_test`. Screenshots return MCP PNG image content. Frame counts are bounded to 1–600; movement components to −1…1. Generated games provide the full scenario suite; custom source games receive a basic runtime check unless they add game-specific scenarios.
+
+For manual source-game development:
+
+```sh
 pnpm bridge
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`. The browser uses a same-origin `/runtime-bridge` WebSocket proxy. Vite attaches the local access token server-side; the token is never bundled into the game or included in a browser URL. `pnpm preview` provides the same proxy at port 4173.
+Open `http://127.0.0.1:5173/?game=maze-escape`. Opening `/` starts the creator studio. `?game=generated-game` starts the default generated example as an agent-controlled authored game.
 
-The bridge binds only to `127.0.0.1:8787`, requires bearer authentication for every WebSocket upgrade, and accepts browser Origins only from the configured local Vite/preview addresses. On first start it creates a private token file at `.lorecraft/bridge-token` (excluded from Git). Node MCP clients read that same file. Local processes running as the same OS user are trusted. Start the MCP process with `pnpm mcp`, or let Antigravity start it from `.agents/mcp_config.json`.
+### Bridge security and cleanup
 
-Antigravity IDE and CLI discover workspace MCP servers from `.agents/mcp_config.json`. For manual development, reload MCP servers after both the bridge and browser game are running. Use the eight entity/game tools against a manually launched runtime; lifecycle status describes only the resources managed by that MCP process. The MCP process communicates with gameplay only through the WebSocket bridge.
+The relay binds `127.0.0.1`, checks bearer authentication and exact allowed Origins, and caps payload size. Vite injects the credential into `/runtime-bridge` upgrades; browser URLs do not contain it. The token now defaults outside the served checkout, under `~/.local/share/lorecraft/<checkout-hash>/bridge-token`, with private directory/file modes. Vite explicitly denies credential and private configuration directories, including the former `.lorecraft` location. Old in-checkout tokens are not reused.
 
-Configuration:
+Same-OS-user Node processes may omit Origin and remain trusted. The newest accepted browser tab takes over; replaced tabs stop reconnecting and pause their engine. Pending requests fail on replacement/disconnection. Heartbeats terminate silent peers. Shutdown bounds unresponsive sockets and clears pending deadlines. Browser control acknowledgement occurs after host disposal; a disconnected tab cannot acknowledge and is reported rather than falsely described as stopped.
 
-- `BRIDGE_PORT`: relay port, used by both the bridge and Vite proxy. Set it in both processes when changing ports.
-- `BRIDGE_ALLOWED_ORIGINS`: comma-separated exact browser Origins, replacing the default local ports 5173 and 4173. Arbitrary and `null` Origins are rejected; authenticated Node clients may omit Origin.
-- `MCP_BRIDGE_URL`: MCP connection URL when changing the relay port.
-- `MCP_BRIDGE_TIMEOUT_MS`: complete request deadline, including connection establishment.
-- `LORECRAFT_BRIDGE_TOKEN_FILE`: optional token-file location; set the same value in bridge, Vite, and MCP processes.
+| Environment variable | Purpose |
+| --- | --- |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Optional server-side AI generation |
+| `BRIDGE_PORT` | Relay port; default 8787 |
+| `LORECRAFT_VITE_PORT` | Managed Vite port; default 5173 |
+| `MCP_BRIDGE_URL` | Node client relay URL; match custom relay ports |
+| `MCP_BRIDGE_TIMEOUT_MS` | Complete request deadline; default 5000 |
+| `BRIDGE_ALLOWED_ORIGINS` | Exact comma-separated Origins for a manually launched relay |
+| `LORECRAFT_BRIDGE_TOKEN_FILE` | Optional shared Node token path; keep it outside served roots |
 
-The newest game tab takes over the relay. A replaced tab stays disconnected until explicitly connected again or reloaded. Unexpected network disconnections still retry. Runtime replacement fails requests sent to the previous game instead of transferring them to a new game. Shutdown closes peers and bounds how long an unresponsive peer can delay it.
+Managed launch allows its selected `http://127.0.0.1:<port>` Origin. Its build deadline is 60 seconds and readiness deadline is 15 seconds. Local config grants lifecycle tool calls 90 seconds.
 
-## Verification
+## Verification and production build
 
-`pnpm test` covers runtime CRUD, authenticated transport, replacement/reconnection behavior, bounded shutdown and connection deadlines, MCP stdio integration, configuration generation, and deterministic Maze Escape gameplay. Lifecycle tests cover selection validation, source failures, cancellation, occupied ports, readiness failures, fresh sessions, repeated launches, and ownership cleanup. A separate MCP integration test starts real bridge/Vite servers and uses a simulated browser peer through the actual proxy; the existing MCP integration test exercises a headless LittleJS game. These automated tests are distinct from verification in a graphical browser.
+```sh
+pnpm test
+pnpm typecheck
+pnpm build
+pnpm preview
+```
 
-`pnpm build` type-checks the application and produces the Vite bundle. Roadmap Step 5 (managed launch/reload) is implemented. Step 6 remains screenshots, input simulation, pause/resume, deterministic runtime stepping, scenarios/assertions, and richer console evidence through MCP. The autonomous build–test–fix loop and playground/save/export workflows follow those capabilities. Dedicated authoring scaffolding is still optional future work; custom source authoring remains Antigravity's responsibility.
+Repository tests cover authenticated transport, malformed responses, request deadlines, replacement, heartbeat cleanup, acknowledged controls, host disposal, gameplay mutation, MCP stdio/lifecycle, scaffolding, import/schema validation, prompt refinement, all 20 genre/theme combinations, AI response repair, credential denial over HTTP, and standalone export execution. Browser QA separately covers the user-facing creation and play flow.
+
+`pnpm build` produces `dist/`. `pnpm preview` serves the built app on port 4173 with the optional generation API and authenticated bridge proxy. The exported game HTML runs entirely offline; the full studio can also be served statically in local-generation mode.

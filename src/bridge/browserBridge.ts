@@ -8,6 +8,8 @@ export interface BrowserBridgeOptions {
   onStatus?: (message: string) => void;
   identity?: RuntimeIdentity;
   onControl?: (control: RuntimeControl) => void;
+  beforeControl?: () => void;
+  onReplaced?: () => void;
 }
 
 /** Browser-side bridge. It delegates only to GameRuntime and never touches LittleJS directly. */
@@ -52,6 +54,7 @@ export class BrowserRuntimeBridge {
       this.socket = undefined;
       if (event.code === bridgeCloseCodes.runtimeReplaced || event.code === bridgeCloseCodes.sessionRejected) {
         this.stopped = true;
+        this.options.onReplaced?.();
         this.reportStatus(event.code === bridgeCloseCodes.sessionRejected ? 'Runtime session is no longer selected.' : 'Runtime bridge replaced by another game tab.');
         return;
       }
@@ -82,7 +85,12 @@ export class BrowserRuntimeBridge {
   private handleMessage(raw: unknown): void {
     const parsed = parseJsonMessage(raw);
     if (!parsed || isBridgeError(parsed)) return;
-    if (parsed.kind === 'control') { this.options.onControl?.(parsed); return; }
+    if (parsed.kind === 'control') {
+      // Stop gameplay first, acknowledge disposal, then let the page navigate.
+      this.options.beforeControl?.();
+      if (parsed.controlId) this.send({ kind: 'controlAck', controlId: parsed.controlId });
+      this.options.onControl?.(parsed); return;
+    }
     if (parsed.kind !== 'request') return;
     if (!this.runtime || (this.options.identity && this.status.state !== 'ready')) {
       this.send(resultResponse(parsed.requestId, { ok: false, error: { code: 'OPERATION_FAILED', message: this.status.message ?? 'Runtime is not ready.' } }));

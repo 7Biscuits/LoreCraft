@@ -34,10 +34,13 @@ function validatePosition(position: EntityPosition, dimension: EntityDimension, 
 }
 
 function validateProperties(properties: EntityProperties | undefined, dimension: EntityDimension): ApiError | undefined {
-  if (!properties) return undefined;
-  if (properties.size) {
+  if (properties === undefined) return undefined;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return fail('INVALID_ARGUMENT', 'properties must be an object.');
+  if (Object.keys(properties).some((key) => !['size', 'speed', 'rotation'].includes(key))) return fail('INVALID_ARGUMENT', 'Unsupported entity property.');
+  if (properties.size !== undefined) {
     const invalidSize = validatePosition(properties.size, dimension, 'properties.size');
     if (invalidSize) return invalidSize;
+    if (Object.values(properties.size).some((value) => value <= 0)) return fail('INVALID_ARGUMENT', 'Every size component must be greater than zero.');
   }
   if (properties.speed !== undefined && (!isFiniteNumber(properties.speed) || properties.speed < 0)) {
     return fail('INVALID_ARGUMENT', 'properties.speed must be a finite number greater than or equal to 0.');
@@ -56,6 +59,7 @@ export class GameRuntime {
   ) {}
 
   createEntity(args: CreateEntityArgs): ApiResult<EntityState> {
+    if (this.bindings.isDisposed?.()) return fail('OPERATION_FAILED', 'The runtime has been destroyed.');
     const invalid = this.validateCreateArgs(args);
     if (invalid) return invalid;
     const existing = this.registry.get(args.id);
@@ -105,6 +109,8 @@ export class GameRuntime {
   }
 
   deleteEntity(id: string): ApiResult<{ id: string }> {
+    const active = this.getActiveEntity(id);
+    if (!active.ok) return active;
     const removed = this.registry.remove(id);
     if (!removed.ok) return removed;
     removed.data.destroy();
@@ -126,12 +132,13 @@ export class GameRuntime {
   }
 
   private getActiveEntity(id: string): ApiResult<ManagedEntity> {
-    if (typeof id !== 'string' || !id.trim()) return fail('INVALID_ARGUMENT', 'Entity ID must be a non-empty string.');
+    if (this.bindings.isDisposed?.()) return fail('OPERATION_FAILED', 'The runtime has been destroyed.');
+    if (typeof id !== 'string' || !id.trim() || id.length > 128 || id !== id.trim()) return fail('INVALID_ARGUMENT', 'Entity ID must be trimmed and contain 1–128 characters.');
     return this.registry.get(id);
   }
 
   private validateCreateArgs(args: CreateEntityArgs): ApiError | undefined {
-    if (!args || typeof args.id !== 'string' || !args.id.trim()) {
+    if (!args || typeof args.id !== 'string' || !args.id.trim() || args.id.length > 128 || args.id !== args.id.trim()) {
       return fail('INVALID_ARGUMENT', 'Entity ID must be a non-empty string.');
     }
     if (!entityTypes.includes(args.type)) return fail('UNSUPPORTED_ENTITY_TYPE', `Unsupported entity type "${String(args.type)}".`);

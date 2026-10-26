@@ -36,7 +36,8 @@ export class MazeEscapeGame implements GameModule {
     if (this.outcome !== 'playing') return;
 
     const player = this.object('player-1');
-    if (!player) return;
+    // A deleted controlling entity enters a recoverable loss instead of silently freezing.
+    if (!player) { this.outcome = 'lost'; return; }
     const speed = this.context.runtime.getEntity('player-1');
     const moveSpeed = speed.ok ? speed.data.properties.speed : mazeConfig.playerSpeed;
     const frameMovement = vec2(frame.movement.x, frame.movement.y).clampLength().scale(moveSpeed * frame.deltaSeconds);
@@ -111,8 +112,22 @@ export class MazeEscapeGame implements GameModule {
   }
 
   private tryMove(player: EngineObject, x: number, y: number): void {
+    // Swept AABB on each movement axis: cost is independent of requested speed.
     const previous = player.pos;
     const next = previous.add(vec2(x, y));
+    for (const obstacle of this.entities('obstacle')) {
+      const wall = obstacle.object as EngineObject;
+      const hx = (player.size.x + wall.size.x) / 2;
+      const hy = (player.size.y + wall.size.y) / 2;
+      if (x && Math.abs(previous.y - wall.pos.y) < hy) {
+        if (x > 0 && previous.x <= wall.pos.x - hx && next.x > wall.pos.x - hx) return;
+        if (x < 0 && previous.x >= wall.pos.x + hx && next.x < wall.pos.x + hx) return;
+      }
+      if (y && Math.abs(previous.x - wall.pos.x) < hx) {
+        if (y > 0 && previous.y <= wall.pos.y - hy && next.y > wall.pos.y - hy) return;
+        if (y < 0 && previous.y >= wall.pos.y + hy && next.y < wall.pos.y + hy) return;
+      }
+    }
     if (Math.abs(next.x) > mazeConfig.halfSize - player.size.x / 2 || Math.abs(next.y) > mazeConfig.halfSize - player.size.y / 2) return;
     player.pos = next;
     if (this.isBlocked(player)) player.pos = previous;

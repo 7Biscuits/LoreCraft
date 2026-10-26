@@ -11,10 +11,11 @@ const finiteNumber = z.number().finite();
 const position2D = z.object({ x: finiteNumber, y: finiteNumber }).strict();
 const position3D = z.object({ x: finiteNumber, y: finiteNumber, z: finiteNumber }).strict();
 const position = z.union([position2D, position3D]);
+const size = z.union([z.object({ x: finiteNumber.positive(), y: finiteNumber.positive() }).strict(), z.object({ x: finiteNumber.positive(), y: finiteNumber.positive(), z: finiteNumber.positive() }).strict()]);
 const entityType = z.enum(['player', 'coin', 'enemy', 'obstacle']);
 const entityDimension = z.enum(['2d', '3d']);
 const properties = z.object({
-  size: position.optional(),
+  size: size.optional(),
   speed: finiteNumber.nonnegative().optional(),
   rotation: finiteNumber.optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, 'Provide at least one property to update.');
@@ -26,7 +27,7 @@ export const toolSchemas = {
     dimension: entityDimension,
     position,
     properties: z.object({
-      size: position.optional(),
+      size: size.optional(),
       speed: finiteNumber.nonnegative().optional(),
       rotation: finiteNumber.optional(),
     }).strict().optional(),
@@ -52,6 +53,8 @@ export const toolSchemas = {
   getRuntimeStatus: z.object({}).strict(),
   reloadGame: z.object({}).strict(),
   stopGame: z.object({}).strict(),
+  stepGame: z.object({ frames: z.number().int().min(1).max(600) }).strict(),
+  simulateInput: z.object({ x: finiteNumber.min(-1).max(1), y: finiteNumber.min(-1).max(1), frames: z.number().int().min(1).max(600) }).strict(),
 };
 
 export function createMcpServer(bridge = new GameBridgeClient(), lifecycle = new RuntimeLifecycleManager()): McpServer {
@@ -113,6 +116,21 @@ export function createMcpServer(bridge = new GameBridgeClient(), lifecycle = new
     description: 'Reset the active game using its existing reset lifecycle.',
     inputSchema: toolSchemas.resetGame,
   }, (args) => callGame(bridge, 'resetGame', args));
+  for (const [name, operation, description] of [
+    ['pause_game', 'pauseGame', 'Pause the active runtime without destroying it.'],
+    ['resume_game', 'resumeGame', 'Resume the active runtime.'],
+    ['get_runtime_logs', 'getRuntimeLogs', 'Read the bounded runtime diagnostic log.'],
+    ['run_gameplay_test', 'runGameplayTest', 'Run deterministic generated-game scenarios and return individual assertions.'],
+  ] as const) server.registerTool(name, { description, inputSchema: z.object({}).strict() }, () => callGame(bridge, operation, {}));
+  server.registerTool('step_game', { description: 'Pause and advance exactly 1–600 engine frames.', inputSchema: toolSchemas.stepGame }, (args) => callGame(bridge, 'stepGame', args));
+  server.registerTool('simulate_input', { description: 'Pause and apply a movement vector for 1–600 frames. Return the resulting state.', inputSchema: toolSchemas.simulateInput }, (args) => callGame(bridge, 'simulateInput', args));
+  server.registerTool('capture_screenshot', { description: 'Capture the current game canvas as a PNG.', inputSchema: z.object({}).strict() }, async () => {
+    const result = await bridge.request('captureScreenshot', {});
+    if (result.ok && result.result && typeof result.result === 'object' && 'dataUrl' in result.result && typeof result.result.dataUrl === 'string' && result.result.dataUrl.startsWith('data:image/png;base64,')) {
+      return { content: [{ type: 'image' as const, mimeType: 'image/png', data: result.result.dataUrl.slice('data:image/png;base64,'.length) }], isError: false };
+    }
+    return toToolResult(result);
+  });
   return server;
 }
 

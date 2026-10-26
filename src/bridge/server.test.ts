@@ -192,3 +192,30 @@ test('identified runtimes must become ready, and Node clients cannot send lifecy
     assert.equal(server.runtimeStatus?.state, 'ready');
   } finally { await closeSocket(client); await closeSocket(runtime); await server.close(); }
 });
+
+test('heartbeat terminates a silent peer and clears its runtime presence', { timeout: 2000 }, async () => {
+  const server = new RuntimeBridgeServer({ port: 0, token: 'test-token', log: () => {}, heartbeatIntervalMs: 25 });
+  await server.ready;
+  const runtime = new WebSocket(`ws://127.0.0.1:${server.port}`, { headers: { Authorization: 'Bearer test-token' }, autoPong: false });
+  try {
+    await once(runtime, 'open');
+    send(runtime, { kind: 'hello', role: 'runtime', identity: { gameId: 'test', runtimeId: 'r', sessionId: 's' } });
+    await once(runtime, 'close');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(server.runtimeStatus, undefined);
+  } finally { runtime.terminate(); await server.close(); }
+});
+
+test('lifecycle owner can distinguish control acknowledgement from timeout', async () => {
+  const server = await startServer(); const runtime = await connect(server);
+  try {
+    send(runtime, { kind: 'hello', role: 'runtime' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const received = nextMessage(runtime);
+    const acknowledged = server.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' }, 200);
+    const message = await received;
+    send(runtime, { kind: 'controlAck', controlId: message.controlId });
+    assert.equal(await acknowledged, true);
+    assert.equal(await server.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' }, 10), false);
+  } finally { await closeSocket(runtime); await server.close(); }
+});

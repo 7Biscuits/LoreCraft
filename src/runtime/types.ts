@@ -78,6 +78,7 @@ export interface ManagedEntity {
 }
 
 export interface RuntimeBindings {
+  isDisposed?(): boolean;
   createEntity(args: CreateEntityArgs): ApiResult<ManagedEntity>;
   getGameState(): Omit<GameStateSnapshot, 'entities'>;
   resetGame(): void;
