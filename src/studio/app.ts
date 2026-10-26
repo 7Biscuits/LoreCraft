@@ -216,8 +216,9 @@ export async function startStudio(): Promise<void> {
 
   async function generate(prompt: string) {
     if (generating) return;
-    const baseSpec = revision.spec;
+    const baseSpec = project.revisions.find((r) => r.id === project.activeRevisionId)!.spec;
     const destination = structuredClone(project);
+    const createNewProject = Boolean(agentActivity);
     generating = true;
     $('#generate').setAttribute('disabled', ''); $('#prompt').setAttribute('disabled', '');
     const progress = $('#generation-progress'); progress.hidden = false;
@@ -238,8 +239,15 @@ export async function startStudio(): Promise<void> {
       $('#progress-2').classList.add('done');
       if (result.checks.some((c) => !c.passed)) throw new Error(`Playtest failed: ${result.checks.filter((c) => !c.passed).map((c) => c.name).join(', ')}. Your current world is preserved.`);
       const next: Revision = { id: uuid(), spec: result.spec, prompt, source: result.source, checks: result.checks, createdAt: new Date().toISOString() };
-      const saved = result.spec.title !== baseSpec.title || agentActivity ? newProject(next) : { ...destination, revisions: [...destination.revisions, next].slice(-50), activeRevisionId: next.id, updatedAt: next.createdAt };
-      saveProject(saved); library = readProjects(); renderLibrary(); $('#project-count').textContent = String(library.length);
+      const saved = result.spec.title !== baseSpec.title || createNewProject ? newProject(next) : { ...destination, revisions: [...destination.revisions, next].slice(-50), activeRevisionId: next.id, updatedAt: next.createdAt };
+      saveProject(saved);
+      // Keep the playing revision/iframe in place, but never save or refine from
+      // an obsolete copy of this project's history after background generation.
+      if (project.id === saved.id) {
+        project = saved;
+        revision = project.revisions.find((r) => r.id === revision.id) ?? revision;
+      }
+      library = readProjects(); renderLibrary(); $('#project-count').textContent = String(library.length);
       $('#progress-3').classList.add('done');
       $<HTMLTextAreaElement>('#prompt').value = ''; $('#prompt-count').textContent = '0 / 4000';
       toast(`${result.spec.title} is ready. Select it in Your games to play.`);
@@ -290,8 +298,8 @@ export async function startStudio(): Promise<void> {
       } else if (action === 'confirm-delete') { deleteProject(button.dataset.id!); library = readProjects(); if (project.id === button.dataset.id) { project = library[0] ?? newProject({ ...first, id: uuid() }); updateProjectView(); loadPreview(); } $('#project-count').textContent = String(library.length); showProjects(); }
       else if (action === 'history') modal('Every chapter of your world', `<p class="modal-intro">Restore a revision to revisit its exact rules and seed. Gameplay restarts; checkpoints are stored separately.</p><div class="history-list">${[...project.revisions].reverse().map((r, i) => `<div><span class="revision-number">${String(project.revisions.length - i).padStart(2, '0')}</span><div><strong>${escape(r.spec.title)}</strong><p>${escape(r.prompt)}</p><small>${new Date(r.createdAt).toLocaleString()} · ${r.source === 'ai' ? 'AI' : 'Local'}</small></div><button class="button small" data-action="restore-revision" data-id="${escape(r.id)}">${r.id === revision.id ? 'Current' : 'Restore'}</button></div>`).join('')}</div>`);
       else if (action === 'restore-revision') { if (generating) return; project.activeRevisionId = button.dataset.id!; project.updatedAt = new Date().toISOString(); persist(); updateProjectView(); loadPreview(); $<HTMLDialogElement>('#modal').close(); toast('Revision restored.'); }
-      else if (action === 'checkpoint') { await request('pauseGame'); if (!snapshot) throw new Error('Wait for the game to initialize.'); saveCheckpoint(project, snapshot); toast('Checkpoint saved, including score, enemies, and objective progress.'); }
-      else if (action === 'restore-checkpoint') { await request('pauseGame'); await request('restore', { state: readCheckpoint(project) }); renderDetails(); toast('Checkpoint restored.'); }
+      else if (action === 'checkpoint') { await request('pauseGame'); if (!snapshot) throw new Error('Wait for the game to initialize.'); saveCheckpoint({ ...project, activeRevisionId: revision.id }, snapshot); toast('Checkpoint saved, including score, enemies, and objective progress.'); }
+      else if (action === 'restore-checkpoint') { await request('pauseGame'); await request('restore', { state: readCheckpoint({ ...project, activeRevisionId: revision.id }) }); renderDetails(); toast('Checkpoint restored.'); }
       else if (action === 'select-entity') { selectedEntity = button.dataset.id!; renderDetails(); }
       else if (action === 'apply-entity') {
         await request('pauseGame');

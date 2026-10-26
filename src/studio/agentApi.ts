@@ -38,8 +38,15 @@ export function agentStatusApi(): Plugin {
     name: 'lorecraft-agent-status', configureServer: configure, configurePreviewServer: configure,
     // Source games are loaded in isolated documents. The agent publishes a fresh
     // runtime after validation; editing them must not reload the whole studio.
-    handleHotUpdate(context) {
-      if (context.file.startsWith(resolve(context.server.config.root, 'src/games') + sep)) return [];
+    hotUpdate: {
+      // Run after Vite's glob hook has discovered added/deleted game modules.
+      order: 'post',
+      handler(context) {
+        if (!context.file.startsWith(resolve(context.server.config.root, 'src/games') + sep)) return;
+        // Fresh documents must see the updated glob without reloading existing ones.
+        for (const module of context.modules) this.environment.moduleGraph.invalidateModule(module);
+        return [];
+      },
     },
   };
 }

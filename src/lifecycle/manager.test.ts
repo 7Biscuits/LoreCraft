@@ -19,6 +19,7 @@ function fixture(options: LifecycleOptions = {}) {
   let port = 0;
   let builds = 0;
   let closes = 0;
+  let opens = 0;
   let buildError: string | undefined;
   let browser: BrowserRuntimeBridge | undefined;
   let observer: ReturnType<typeof setInterval> | undefined;
@@ -47,12 +48,18 @@ function fixture(options: LifecycleOptions = {}) {
     bridgePort: 0, token, readyTimeoutMs: 500,
     validateSource: async () => { builds++; if (buildError) throw new Error(buildError); },
     startDevServer: async (bridgePort) => { port = bridgePort; observer = setInterval(() => { const activity = manager.getActivity(); if (observe && activity?.runtimeUrl && new URL(activity.runtimeUrl).searchParams.get('session') !== connectedSession) connect(activity.runtimeUrl); }, 10); return { url: 'http://127.0.0.1:5173', close: async () => { clearInterval(observer); closes++; } }; },
-    openBrowser: async (url) => { observe = true; connect(url); },
+    openBrowser: async (url) => { opens++; observe = true; connect(url); },
     ...options,
   });
-  return { manager, connect, get builds() { return builds; }, get closes() { return closes; },
+  return { manager, connect, get builds() { return builds; }, get closes() { return closes; }, get opens() { return opens; },
     get port() { return port; }, setBuildError: (message?: string) => { buildError = message; },
     disconnect: () => browser?.disconnect(),
+    closeBrowser: async () => {
+      observe = false; browser?.disconnect();
+      const deadline = Date.now() + 1000;
+      while (manager.getStatus().runtimeId && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(manager.getStatus().runtimeId, undefined);
+    },
   };
 }
 
@@ -67,6 +74,7 @@ test('launch, inspect, reload, stop, and repeated launch preserve ownership and 
     assert.equal(initial.state, 'ready');
     assert.equal((await manager.launchGame()).ok, true);
     assert.equal(f.builds, 1);
+    assert.equal(f.opens, 1);
     client = new GameBridgeClient({ url: `ws://127.0.0.1:${f.port}`, token });
     assert.equal((await client.request('getGameState', {})).ok, true);
     assert.equal((await manager.reloadGame()).ok, true);
@@ -88,6 +96,38 @@ test('launch, inspect, reload, stop, and repeated launch preserve ownership and 
     assert.equal((await manager.stopGame()).ok, true);
     assert.equal(f.closes, 2);
   } finally { f.disconnect(); await client?.close(); await manager.stopGame(); }
+});
+
+test('launch reopens a closed studio while retaining owned servers and reuses a live studio', async () => {
+  const f = fixture();
+  try {
+    assert.equal((await f.manager.launchGame()).ok, true);
+    const originalSession = f.manager.getStatus().sessionId;
+    await f.closeBrowser();
+    assert.equal((await f.manager.launchGame()).ok, true);
+    assert.equal(f.opens, 2);
+    assert.equal(f.closes, 0);
+    assert.notEqual(f.manager.getStatus().sessionId, originalSession);
+    assert.equal((await f.manager.launchGame('super-mario')).ok, true);
+    assert.equal(f.opens, 2, 'Switching managed games must reuse the live studio');
+    await f.closeBrowser();
+    assert.equal((await f.manager.beginCreation('new-game', 'New game', '')).ok, true);
+    assert.equal(f.opens, 3, 'Creation should also reopen a closed studio');
+  } finally { f.disconnect(); await f.manager.stopGame(); }
+});
+
+test('launch recovers when the studio closed before publishing its first runtime', async () => {
+  let opens = 0;
+  const f = fixture({ readyTimeoutMs: 500, openBrowser: async (url) => {
+    // The authoring tab opens and closes before it ever connects a runtime.
+    if (++opens === 2) f.connect(url);
+  } });
+  try {
+    assert.equal((await f.manager.beginCreation('maze-escape', 'Maze', '')).ok, true);
+    assert.equal(opens, 1);
+    assert.equal((await f.manager.launchGame()).ok, true);
+    assert.equal(opens, 2);
+  } finally { f.disconnect(); await f.manager.stopGame(); }
 });
 
 test('validation errors prevent launch and leave a ready game available after a failed reload', async () => {

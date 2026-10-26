@@ -144,7 +144,7 @@ export class RuntimeLifecycleManager {
         this.runtimePublished = true;
         this.state = 'waiting'; this.message = 'Waiting for browser game initialization.';
         this.progress('loading', 'Build passed. Loading the game into the studio preview.');
-        await this.waitUntilReady(signal);
+        await this.waitUntilReady(signal, open);
         this.state = 'ready'; this.message = undefined;
         this.progress('ready', 'Game initialized. Ready to play in the preview.');
         return this.success();
@@ -236,7 +236,12 @@ export class RuntimeLifecycleManager {
   }
   private async ensureServers(signal: AbortSignal): Promise<void> {
     if (!this.bridge) this.bridge = new RuntimeBridgeServer({ port: this.options.bridgePort ?? Number(process.env.BRIDGE_PORT ?? 8787), token: this.options.token,
-      log: (message) => this.diagnostic(message), acceptRuntime: (identity) => this.acceptRuntime(identity), allowedOrigins: [`http://127.0.0.1:${this.vitePort}`], getStudioActivity: () => this.getActivity() });
+      log: (message) => this.diagnostic(message), acceptRuntime: (identity) => this.acceptRuntime(identity), allowedOrigins: [`http://127.0.0.1:${this.vitePort}`], getStudioActivity: () => this.getActivity(),
+      onRuntimeChange: (presence) => {
+        // A closed/disconnected browser must be reopened by the next launch.
+        // Managed stop/reload actions also disconnect, but keep the studio alive.
+        if (!presence && !this.action) this.studioOpened = false;
+      } });
     await this.bridge.ready; signal.throwIfAborted();
     this.devServer ??= await (this.options.startDevServer?.(this.bridge.port, (message) => this.diagnostic(message)) ?? this.startVite(this.bridge.port));
     signal.throwIfAborted(); this.url = this.studioUrl();
@@ -247,8 +252,10 @@ export class RuntimeLifecycleManager {
     catch (error) { this.diagnostic(this.errorMessage(error)); }
   }
 
-  private async waitUntilReady(signal: AbortSignal): Promise<void> {
-    const deadline = Date.now() + (this.options.readyTimeoutMs ?? 15000);
+  private async waitUntilReady(signal: AbortSignal, reopenStudio = false): Promise<void> {
+    const timeout = this.options.readyTimeoutMs ?? 15000;
+    const deadline = Date.now() + timeout;
+    let reopenAt = reopenStudio ? Date.now() + Math.min(2000, timeout / 2) : Infinity;
     while (true) {
       signal.throwIfAborted();
       const presence = this.bridge?.runtimeStatus;
@@ -257,6 +264,14 @@ export class RuntimeLifecycleManager {
         if (presence.state === 'ready') return;
       }
       if (Date.now() >= deadline) throw new LifecycleFailure('RUNTIME_TIMEOUT', `Game did not become ready. Open ${this.url} and inspect runtime diagnostics.`);
+      // A studio closed during authoring/building has no runtime socket whose
+      // disconnect we can observe. Give its poller time to connect, then reopen
+      // once if no matching runtime appeared. Explicit headless launches stay headless.
+      if (Date.now() >= reopenAt && presence?.sessionId !== this.sessionId) {
+        reopenAt = Infinity; this.studioOpened = false;
+        await this.showStudio(true); signal.throwIfAborted();
+        continue;
+      }
       await new Promise<void>((resolve) => {
         const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
         const timer = setTimeout(finish, 25);

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, isFileServingAllowed } from 'vite';
+import type { Plugin } from 'vite';
 import config from '../../vite.config';
 import { agentStatusApi } from './agentApi';
 
@@ -51,9 +52,54 @@ test('game library exposes fresh metadata without a relay and protects read-only
       assert.equal((await fetch(base + route, { headers: { Origin: 'https://untrusted.example' } })).status, 403);
     }
     // Edits to source games must not propagate a global full-page HMR reload.
-    assert.equal(typeof plugin.handleHotUpdate, 'function');
-    const hook = plugin.handleHotUpdate as (context: unknown) => unknown;
-    assert.deepEqual(hook({ file: join(server.config.root, 'src/games/old-game/index.ts'), server }), []);
-    assert.equal(hook({ file: join(server.config.root, 'src/studio/app.ts'), server }), undefined);
+    assert.equal(typeof plugin.hotUpdate, 'object');
+  } finally { await server.close(); rmSync(root, { recursive: true }); }
+});
+
+test('game additions, edits and deletions refresh modules without broadcasting page reloads', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'lorecraft-game-hmr-')));
+  mkdirSync(join(root, 'src/games/old-game'), { recursive: true });
+  writeFileSync(join(root, 'src/main.ts'), "import './catalog.ts';");
+  writeFileSync(join(root, 'src/catalog.ts'), "export const games = import.meta.glob('./games/*/index.ts');");
+  const oldGame = join(root, 'src/games/old-game/index.ts');
+  writeFileSync(oldGame, 'export const game = 1;');
+  let updated: (() => void) | undefined;
+  const probe: Plugin = { name: 'observe-game-hmr', hotUpdate: { order: 'post', handler() { if (this.environment.name === 'client') updated?.(); } } };
+  const server = await createServer({ configFile: false, root, plugins: [agentStatusApi(), probe], logLevel: 'silent', server: { host: '127.0.0.1', port: 0, watch: null } });
+  const messages: unknown[] = [];
+  server.environments.client!.hot.send = ((message: unknown) => { messages.push(message); }) as typeof server.environments.client.hot.send;
+  const update = async (type: 'add' | 'change' | 'unlink', file: string) => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Vite did not process the game update.')), 2000);
+      updated = () => { clearTimeout(timer); resolve(); };
+      server.watcher.emit(type, file);
+    });
+    // Vite sends HMR messages after all hooks complete.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(messages, [], `${type} must not interrupt active documents`);
+  };
+  try {
+    await server.listen();
+    await server.transformRequest('/src/main.ts');
+    await server.transformRequest('/src/catalog.ts');
+    await server.transformRequest('/src/games/old-game/index.ts');
+    const newGame = join(root, 'src/games/new-game/index.ts');
+    mkdirSync(join(root, 'src/games/new-game'));
+    writeFileSync(newGame, 'export const game = 2;');
+    await update('add', newGame);
+    assert.match((await server.transformRequest('/src/catalog.ts'))!.code, /new-game/);
+    writeFileSync(oldGame, 'export const game = 3;');
+    await update('change', oldGame);
+    assert.match((await server.transformRequest('/src/games/old-game/index.ts'))!.code, /game = 3/);
+    rmSync(newGame);
+    await update('unlink', newGame);
+    assert.doesNotMatch((await server.transformRequest('/src/catalog.ts'))!.code, /new-game/);
+    // Changes outside source games retain Vite's normal reload behavior.
+    await new Promise<void>((resolve) => {
+      updated = resolve;
+      server.watcher.emit('change', join(root, 'src/main.ts'));
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(messages.some((message) => (message as { type: string }).type === 'full-reload'));
   } finally { await server.close(); rmSync(root, { recursive: true }); }
 });
