@@ -16,11 +16,13 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.4.0",
     "littlejsengine": "^1.28.0",
+    "pg": "^8.23.1",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
