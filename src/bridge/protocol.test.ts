@@ -26,3 +26,18 @@ test('validates structured requests and rejects unsupported operations', () => {
     message: 'request.args is missing required fields for setEntityProperties.',
   });
 });
+
+test('validates lifecycle identity, status, and control messages', () => {
+  const identity = { sessionId: 'session-1', runtimeId: 'document-1', gameId: 'maze-escape' };
+  assert.deepEqual(parseBridgeMessage({ kind: 'hello', role: 'runtime', identity }), { kind: 'hello', role: 'runtime', identity });
+  for (const message of [
+    { kind: 'hello', role: 'runtime', identity: { ...identity, runtimeId: '' } },
+    { kind: 'runtimeStatus', state: 'unknown' },
+    { kind: 'runtimeStatus', state: 'error', message: 'x'.repeat(4001) },
+    { kind: 'control', action: 'execute', url: '/' },
+    { kind: 'control', action: 'navigate' },
+  ]) {
+    const result = parseBridgeMessage(message);
+    assert.equal('code' in result && result.code, 'MALFORMED_MESSAGE');
+  }
+});

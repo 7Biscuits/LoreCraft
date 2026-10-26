@@ -14,11 +14,36 @@ export const bridgeOperations = [
 export type BridgeOperation = typeof bridgeOperations[number];
 export type BridgeRole = 'runtime' | 'client';
 
-export const bridgeCloseCodes = { runtimeReplaced: 4000 } as const;
+export const bridgeCloseCodes = { runtimeReplaced: 4000, sessionRejected: 4001 } as const;
+
+export interface RuntimeIdentity {
+  sessionId: string;
+  runtimeId: string;
+  gameId: string;
+}
+
+export interface RuntimeStatus {
+  kind: 'runtimeStatus';
+  state: 'initializing' | 'ready' | 'error';
+  message?: string;
+}
+
+export interface RuntimePresence extends RuntimeIdentity {
+  state: RuntimeStatus['state'];
+  message?: string;
+}
+
+/** Sent only by the Node lifecycle owner, never forwarded from ordinary clients. */
+export interface RuntimeControl {
+  kind: 'control';
+  action: 'navigate' | 'stop';
+  url?: string;
+}
 
 export interface BridgeHello {
   kind: 'hello';
   role: BridgeRole;
+  identity?: RuntimeIdentity;
 }
 
 export interface BridgeRequest {
@@ -37,11 +62,11 @@ export interface BridgeResponse {
 }
 
 export interface BridgeError {
-  code: 'MALFORMED_MESSAGE' | 'UNSUPPORTED_OPERATION' | 'RUNTIME_UNAVAILABLE' | 'REQUEST_TIMEOUT' | 'RUNTIME_DISCONNECTED' | 'DUPLICATE_REQUEST_ID';
+  code: 'MALFORMED_MESSAGE' | 'UNSUPPORTED_OPERATION' | 'RUNTIME_UNAVAILABLE' | 'REQUEST_TIMEOUT' | 'RUNTIME_DISCONNECTED' | 'DUPLICATE_REQUEST_ID' | 'RUNTIME_NOT_READY';
   message: string;
 }
 
-export type BridgeMessage = BridgeHello | BridgeRequest | BridgeResponse;
+export type BridgeMessage = BridgeHello | BridgeRequest | BridgeResponse | RuntimeStatus | RuntimeControl;
 
 export type BridgeApiResult = ApiResult<unknown>;
 
@@ -50,9 +75,25 @@ export function parseBridgeMessage(raw: unknown): BridgeMessage | BridgeError {
     return bridgeError('MALFORMED_MESSAGE', 'Message must be an object with a supported kind.');
   }
   if (raw.kind === 'hello') {
+    const identity = raw.identity;
+    if (identity !== undefined && (!isObject(identity) || !['sessionId', 'runtimeId', 'gameId'].every((key) => isRequestId(identity[key])))) {
+      return bridgeError('MALFORMED_MESSAGE', 'Runtime identity needs sessionId, runtimeId, and gameId strings.');
+    }
     return raw.role === 'runtime' || raw.role === 'client'
-      ? { kind: 'hello', role: raw.role }
+      ? { kind: 'hello', role: raw.role, ...(identity ? { identity: identity as unknown as RuntimeIdentity } : {}) }
       : bridgeError('MALFORMED_MESSAGE', 'hello.role must be "runtime" or "client".');
+  }
+  if (raw.kind === 'runtimeStatus') {
+    if (typeof raw.state !== 'string' || !['initializing', 'ready', 'error'].includes(raw.state) || (raw.message !== undefined && (typeof raw.message !== 'string' || raw.message.length > 4000))) {
+      return bridgeError('MALFORMED_MESSAGE', 'Invalid runtime status.');
+    }
+    return { kind: 'runtimeStatus', state: raw.state as RuntimeStatus['state'], message: raw.message as string | undefined };
+  }
+  if (raw.kind === 'control') {
+    if ((raw.action !== 'navigate' && raw.action !== 'stop') || (raw.action === 'navigate' && (typeof raw.url !== 'string' || raw.url.length > 2048))) {
+      return bridgeError('MALFORMED_MESSAGE', 'Invalid runtime control.');
+    }
+    return { kind: 'control', action: raw.action, url: raw.url as string | undefined };
   }
   if (raw.kind === 'request') {
     if (!isRequestId(raw.requestId)) return bridgeError('MALFORMED_MESSAGE', 'request.requestId must be a non-empty string.');

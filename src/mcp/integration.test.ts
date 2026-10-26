@@ -84,7 +84,10 @@ test('MCP stdio controls the authenticated live game and reports objectives and 
   try {
     assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'regression', version: '1' } })).error, undefined);
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
-    assert.equal((await rpc('tools/list', {})).result?.tools?.length, 8);
+    assert.equal((await rpc('tools/list', {})).result?.tools?.length, 14);
+    assert.equal((await rpc('tools/call', { name: 'list_games', arguments: {} })).result?.isError, false);
+    assert.equal((await rpc('tools/call', { name: 'get_runtime_status', arguments: {} })).result?.isError, false);
+    assert.equal((await rpc('tools/call', { name: 'select_game', arguments: { gameId: 'does-not-exist' } })).result?.isError, true);
     await call('set_entity_properties', { id: 'enemy-1', properties: { speed: 0 } });
     const inspected = await call('get_game_state');
     assert.equal(inspected?.result?.entities.find((entity) => entity.id === 'enemy-1')?.properties.speed, 0);

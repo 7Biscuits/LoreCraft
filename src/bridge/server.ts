@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
 import { defaultBridgeOrigins, hasBridgeAccess, loadOrCreateBridgeToken } from './access';
 import { bridgeCloseCodes, bridgeError, errorResponse, parseBridgeMessage } from './protocol';
-import type { BridgeError, BridgeRequest, BridgeResponse } from './protocol';
+import type { BridgeError, BridgeHello, BridgeRequest, BridgeResponse, RuntimeControl, RuntimeIdentity, RuntimePresence } from './protocol';
 
 export interface BridgeServerOptions {
   port?: number;
@@ -13,6 +13,8 @@ export interface BridgeServerOptions {
   token?: string;
   allowedOrigins?: readonly string[];
   log?: (message: string) => void;
+  acceptRuntime?: (identity: RuntimeIdentity | undefined) => boolean;
+  onRuntimeChange?: (presence: RuntimePresence | undefined) => void;
 }
 
 type ClientRole = 'runtime' | 'client' | undefined;
@@ -26,6 +28,7 @@ export class RuntimeBridgeServer {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly roles = new Map<WebSocket, ClientRole>();
   private runtime: WebSocket | undefined;
+  private presence?: RuntimePresence;
   private readonly requestTimeoutMs: number;
   private readonly log: (message: string) => void;
   private readonly shutdownTimeoutMs: number;
@@ -33,7 +36,7 @@ export class RuntimeBridgeServer {
   private closePromise?: Promise<void>;
   readonly ready: Promise<void>;
 
-  constructor(options: BridgeServerOptions = {}) {
+  constructor(private readonly options: BridgeServerOptions = {}) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
     this.log = options.log ?? console.info;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 1_000;
@@ -66,6 +69,21 @@ export class RuntimeBridgeServer {
   get port(): number {
     const address = this.server.address();
     return typeof address === 'object' && address ? address.port : 0;
+  }
+
+  get runtimeStatus(): RuntimePresence | undefined {
+    return this.presence ? { ...this.presence } : undefined;
+  }
+
+  controlRuntime(control: RuntimeControl): boolean {
+    if (!this.runtime || this.runtime.readyState !== WebSocket.OPEN) return false;
+    this.failPending('The game is reloading or stopping.');
+    if (this.presence) {
+      this.presence = { ...this.presence, state: 'initializing' };
+      this.options.onRuntimeChange?.(this.runtimeStatus);
+    }
+    this.send(this.runtime, control);
+    return true;
   }
 
   close(): Promise<void> {
@@ -114,19 +132,30 @@ export class RuntimeBridgeServer {
       this.reject(socket, requestId, message);
       return;
     }
-    if (message.kind === 'hello') return this.registerRole(socket, message.role);
+    if (message.kind === 'hello') return this.registerRole(socket, message);
     if (message.kind === 'request') return this.forwardRequest(socket, message);
-    this.forwardResponse(socket, message);
+    if (message.kind === 'response') return this.forwardResponse(socket, message);
+    if (message.kind === 'runtimeStatus' && socket === this.runtime && this.presence) {
+      this.presence = { ...this.presence, state: message.state, message: message.message };
+      this.options.onRuntimeChange?.(this.runtimeStatus);
+    }
   }
 
-  private registerRole(socket: WebSocket, role: ClientRole): void {
+  private registerRole(socket: WebSocket, hello: BridgeHello): void {
     if (this.roles.get(socket)) return this.reject(socket, '', bridgeError('MALFORMED_MESSAGE', 'Client role is already registered.'));
+    const { role } = hello;
     if (role === 'runtime') {
+      if (this.options.acceptRuntime && !this.options.acceptRuntime(hello.identity)) {
+        socket.close(bridgeCloseCodes.sessionRejected, 'This runtime session is no longer selected.');
+        return;
+      }
       if (this.runtime && this.runtime !== socket) {
         this.failPending('Browser game runtime was replaced.');
         this.runtime.close(bridgeCloseCodes.runtimeReplaced, 'Replaced by a new runtime connection.');
       }
       this.runtime = socket;
+      this.presence = hello.identity ? { ...hello.identity, state: 'initializing' } : undefined;
+      this.options.onRuntimeChange?.(this.runtimeStatus);
       this.log('Game runtime connected.');
     }
     this.roles.set(socket, role);
@@ -137,6 +166,9 @@ export class RuntimeBridgeServer {
     if (this.roles.get(client) !== 'client') return this.reject(client, request.requestId, bridgeError('MALFORMED_MESSAGE', 'Send a client hello before requests.'));
     if (!this.runtime || this.runtime.readyState !== WebSocket.OPEN) {
       return this.reject(client, request.requestId, bridgeError('RUNTIME_UNAVAILABLE', 'No browser game runtime is connected.'));
+    }
+    if (this.presence && this.presence.state !== 'ready') {
+      return this.reject(client, request.requestId, bridgeError('RUNTIME_NOT_READY', this.presence.message ?? 'The game has not finished initializing.'));
     }
     if (this.pending.has(request.requestId)) {
       return this.reject(client, request.requestId, bridgeError('DUPLICATE_REQUEST_ID', `Request ID "${request.requestId}" is already pending.`));
@@ -165,6 +197,8 @@ export class RuntimeBridgeServer {
     this.roles.delete(socket);
     if (role === 'runtime' && this.runtime === socket) {
       this.runtime = undefined;
+      this.presence = undefined;
+      this.options.onRuntimeChange?.(undefined);
       this.log('Game runtime disconnected.');
       this.failPending('Browser game runtime disconnected.');
     }
@@ -187,7 +221,7 @@ export class RuntimeBridgeServer {
     this.send(socket, errorResponse(requestId, error));
   }
 
-  private send(socket: WebSocket, message: BridgeRequest | BridgeResponse): void {
+  private send(socket: WebSocket, message: BridgeRequest | BridgeResponse | RuntimeControl): void {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
 }

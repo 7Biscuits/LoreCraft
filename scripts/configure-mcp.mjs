@@ -16,7 +16,7 @@ export function configureMcp(root = fileURLToPath(new URL('..', import.meta.url)
       MCP_BRIDGE_URL: 'ws://127.0.0.1:8787', MCP_BRIDGE_TIMEOUT_MS: '5000',
       ...config.mcpServers['lorecraft-game']?.env,
     },
-    timeoutSeconds: config.mcpServers['lorecraft-game']?.timeoutSeconds ?? 30,
+    timeoutSeconds: Math.max(config.mcpServers['lorecraft-game']?.timeoutSeconds ?? 90, 90),
   };
   mkdirSync(resolve(root, '.agents'), { recursive: true });
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);

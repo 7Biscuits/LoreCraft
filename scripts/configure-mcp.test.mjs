@@ -18,6 +18,7 @@ test('MCP setup derives cwd from the checkout and preserves other server setting
     assert.equal(config.mcpServers['lorecraft-game'].cwd, root);
     assert.deepEqual(config.mcpServers.other, { command: 'other' });
     assert.equal(config.mcpServers['lorecraft-game'].env.MCP_BRIDGE_TIMEOUT_MS, '10000');
+    assert.ok(config.mcpServers['lorecraft-game'].timeoutSeconds >= 90);
     configureMcp(root);
     assert.equal(readFileSync(path, 'utf8'), first);
   } finally { rmSync(root, { recursive: true }); }

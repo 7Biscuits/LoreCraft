@@ -172,3 +172,23 @@ test('shutdown closes connected clients and terminates an unresponsive peer', { 
   socket.terminate();
   unfinishedHandshake.destroy();
 });
+
+test('identified runtimes must become ready, and Node clients cannot send lifecycle controls', async () => {
+  const server = await startServer(50);
+  const runtime = await connect(server);
+  const client = await connect(server);
+  try {
+    send(runtime, { kind: 'hello', role: 'runtime', identity: { sessionId: 'session', runtimeId: 'runtime', gameId: 'test' } });
+    send(client, { kind: 'hello', role: 'client' });
+    const notReady = nextMessage(client);
+    send(client, { kind: 'request', requestId: 'early', operation: 'getGameState', args: {} });
+    assert.equal(((await notReady).error as { code: string }).code, 'RUNTIME_NOT_READY');
+    send(runtime, { kind: 'runtimeStatus', state: 'ready' });
+    const forwarded = nextMessage(runtime);
+    // This must not arrive at the runtime. The next message must be the state request.
+    send(client, { kind: 'control', action: 'stop' });
+    send(client, { kind: 'request', requestId: 'after-ready', operation: 'getGameState', args: {} });
+    assert.equal((await forwarded).requestId, 'after-ready');
+    assert.equal(server.runtimeStatus?.state, 'ready');
+  } finally { await closeSocket(client); await closeSocket(runtime); await server.close(); }
+});

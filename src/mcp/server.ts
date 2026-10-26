@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url';
 import * as z from 'zod/v4';
 import { GameBridgeClient } from './bridgeClient';
 import type { GameBridgeResult } from './bridgeClient';
+import { RuntimeLifecycleManager } from '../lifecycle/manager';
+import type { LifecycleResult } from '../lifecycle/manager';
 
 const finiteNumber = z.number().finite();
 const position2D = z.object({ x: finiteNumber, y: finiteNumber }).strict();
@@ -44,14 +46,40 @@ export const toolSchemas = {
   deleteEntity: z.object({ id: z.string().trim().min(1).max(128) }),
   getGameState: z.object({}),
   resetGame: z.object({}),
+  listGames: z.object({}).strict(),
+  selectGame: z.object({ gameId: z.string().regex(/^[a-z0-9-]+$/).max(128) }).strict(),
+  launchGame: z.object({ gameId: z.string().regex(/^[a-z0-9-]+$/).max(128).optional(), openBrowser: z.boolean().default(true) }).strict(),
+  getRuntimeStatus: z.object({}).strict(),
+  reloadGame: z.object({}).strict(),
+  stopGame: z.object({}).strict(),
 };
 
-export function createMcpServer(bridge = new GameBridgeClient()): McpServer {
+export function createMcpServer(bridge = new GameBridgeClient(), lifecycle = new RuntimeLifecycleManager()): McpServer {
   const server = new McpServer(
     { name: 'lorecraft-game', version: '0.1.0' },
-    { instructions: 'These tools control only the currently running Lorecraft game through its local runtime bridge.' },
+    { instructions: 'Author source in src/games, register games in the manifest, then list/select/launch games. launch_game validates with pnpm build and waits for the browser; reload_game validates and replaces the document. Runtime entity tools use the authenticated bridge. Stop owned servers before ending work.' },
   );
-  server.server.onclose = () => { void bridge.close(); };
+  server.server.onclose = () => { void Promise.all([bridge.close(), lifecycle.stopGame()]); };
+
+  server.registerTool('list_games', {
+    description: 'List registered source-authored games available to launch.', inputSchema: toolSchemas.listGames,
+  }, () => toToolResult({ ok: true, result: { games: lifecycle.listGames() } }));
+  server.registerTool('select_game', {
+    description: 'Select a registered game for the next launch. Stop a different running game first.', inputSchema: toolSchemas.selectGame,
+  }, ({ gameId }) => toToolResult(lifecycle.selectGame(gameId)));
+  server.registerTool('launch_game', {
+    description: 'Validate source, start owned loopback bridge and Vite servers, open a browser, and wait for readiness. Existing manual servers must be stopped first. With openBrowser=false, open the URL from get_runtime_status in another client while this call waits.',
+    inputSchema: toolSchemas.launchGame,
+  }, async ({ gameId, openBrowser }) => toToolResult(await lifecycle.launchGame(gameId, openBrowser)));
+  server.registerTool('get_runtime_status', {
+    description: 'Inspect managed game selection, URL, session identity, readiness, diagnostics, and server ownership.', inputSchema: toolSchemas.getRuntimeStatus,
+  }, () => toToolResult({ ok: true, result: lifecycle.getStatus() }));
+  server.registerTool('reload_game', {
+    description: 'Validate edited source and reload the managed browser document. Wait for the new session to initialize. Gameplay state resets.', inputSchema: toolSchemas.reloadGame,
+  }, async () => toToolResult(await lifecycle.reloadGame()));
+  server.registerTool('stop_game', {
+    description: 'Cancel a pending launch, stop the managed document, and close owned bridge/Vite servers. Leaves manually started servers alone.', inputSchema: toolSchemas.stopGame,
+  }, async () => toToolResult(await lifecycle.stopGame()));
 
   server.registerTool('create_entity', {
     description: 'Create a player, coin, enemy, or obstacle in the running game.',
@@ -93,8 +121,8 @@ async function callGame(bridge: GameBridgeClient, operation: Parameters<GameBrid
   return toToolResult(result);
 }
 
-function toToolResult(result: GameBridgeResult) {
-  const payload = result.ok ? { ok: true, result: result.result } : { ok: false, error: result.error };
+function toToolResult(result: GameBridgeResult | LifecycleResult) {
+  const payload = result;
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
     structuredContent: payload,

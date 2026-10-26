@@ -42,11 +42,13 @@ export class AuthoredGameHost {
   private initialized = false;
   private startPromise?: Promise<GameRuntime>;
   private renderer3DReady = false;
+  private destroyed = false;
+  private failure?: unknown;
   private readonly registry = new EntityRegistry();
   readonly runtime: GameRuntime;
   private readonly context: GameContext;
 
-  constructor(private readonly game: GameModule) {
+  constructor(private readonly game: GameModule, private readonly onError?: (error: unknown) => void) {
     const validation = validateGameModule(game);
     if (!validation.ok) throw new Error(`Invalid game module: ${validation.errors.join(' ')}`);
     this.runtime = new GameRuntime(this.registry, {
@@ -72,18 +74,35 @@ export class AuthoredGameHost {
     this.startPromise = engineInit(
       () => this.init(),
       () => {
-        if (this.initialized) this.game.update({ deltaSeconds: timeDelta, movement: keyDirection(), restart: keyWasPressed('KeyR') });
+        this.guard(() => this.game.update({ deltaSeconds: timeDelta, movement: keyDirection(), restart: keyWasPressed('KeyR') }));
       },
       undefined,
-      () => { if (this.initialized) this.game.render(); },
-    ).then(() => this.runtime);
+      () => this.guard(() => this.game.render()),
+    ).then(() => {
+      if (!this.initialized || this.destroyed) throw this.failure ?? new Error('The game stopped during initialization.');
+      return this.runtime;
+    });
     return this.startPromise;
   }
 
   destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     this.initialized = false;
     try { this.game.destroy(); }
     finally { this.clearEntities(); }
+  }
+
+  private guard(callback: () => void): void {
+    if (!this.initialized) return;
+    try { callback(); }
+    catch (error) {
+      this.failure = error;
+      try { this.destroy(); } finally {
+        if (this.onError) this.onError(error);
+        else throw error;
+      }
+    }
   }
 
   private init(): void {

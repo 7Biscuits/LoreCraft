@@ -10,7 +10,7 @@
     "setup:mcp": "node scripts/configure-mcp.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts scripts/*.test.mjs",
+    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts src/lifecycle/*.test.ts scripts/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

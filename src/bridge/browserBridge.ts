@@ -1,11 +1,13 @@
 import { bridgeCloseCodes, dispatchRuntimeOperation, isBridgeError, parseBridgeMessage, resultResponse } from './protocol';
-import type { BridgeMessage, BridgeResponse, RuntimeOperations } from './protocol';
+import type { BridgeMessage, BridgeResponse, RuntimeControl, RuntimeIdentity, RuntimeOperations, RuntimeStatus } from './protocol';
 
 export interface BrowserBridgeOptions {
   url: string;
   reconnectDelayMs?: number;
   WebSocketConstructor?: typeof WebSocket;
   onStatus?: (message: string) => void;
+  identity?: RuntimeIdentity;
+  onControl?: (control: RuntimeControl) => void;
 }
 
 /** Browser-side bridge. It delegates only to GameRuntime and never touches LittleJS directly. */
@@ -16,9 +18,10 @@ export class BrowserRuntimeBridge {
   private lastStatus = '';
   private readonly WebSocketConstructor: typeof WebSocket;
   private readonly reconnectDelayMs: number;
+  private status: RuntimeStatus = { kind: 'runtimeStatus', state: 'initializing' };
 
   constructor(
-    private readonly runtime: RuntimeOperations,
+    private runtime: RuntimeOperations | undefined,
     private readonly options: BrowserBridgeOptions,
   ) {
     this.WebSocketConstructor = options.WebSocketConstructor ?? WebSocket;
@@ -37,7 +40,8 @@ export class BrowserRuntimeBridge {
     this.socket = socket;
     socket.addEventListener('open', () => {
       if (this.stopped || this.socket !== socket) { socket.close(); return; }
-      this.send({ kind: 'hello', role: 'runtime' });
+      this.send({ kind: 'hello', role: 'runtime', ...(this.options.identity ? { identity: this.options.identity } : {}) });
+      if (this.options.identity) this.send(this.status);
       this.reportStatus('Runtime bridge connected.');
     });
     socket.addEventListener('message', (event) => {
@@ -46,9 +50,9 @@ export class BrowserRuntimeBridge {
     socket.addEventListener('close', (event) => {
       if (this.socket !== socket) return;
       this.socket = undefined;
-      if (event.code === bridgeCloseCodes.runtimeReplaced) {
+      if (event.code === bridgeCloseCodes.runtimeReplaced || event.code === bridgeCloseCodes.sessionRejected) {
         this.stopped = true;
-        this.reportStatus('Runtime bridge replaced by another game tab.');
+        this.reportStatus(event.code === bridgeCloseCodes.sessionRejected ? 'Runtime session is no longer selected.' : 'Runtime bridge replaced by another game tab.');
         return;
       }
       if (!this.stopped) {
@@ -65,9 +69,25 @@ export class BrowserRuntimeBridge {
     this.socket?.close();
   }
 
+  setRuntime(runtime: RuntimeOperations): void {
+    this.runtime = runtime;
+    this.setRuntimeStatus('ready');
+  }
+
+  setRuntimeStatus(state: RuntimeStatus['state'], message?: string): void {
+    this.status = { kind: 'runtimeStatus', state, message: message?.slice(0, 4000) };
+    this.send(this.status);
+  }
+
   private handleMessage(raw: unknown): void {
     const parsed = parseJsonMessage(raw);
-    if (!parsed || isBridgeError(parsed) || parsed.kind !== 'request') return;
+    if (!parsed || isBridgeError(parsed)) return;
+    if (parsed.kind === 'control') { this.options.onControl?.(parsed); return; }
+    if (parsed.kind !== 'request') return;
+    if (!this.runtime || (this.options.identity && this.status.state !== 'ready')) {
+      this.send(resultResponse(parsed.requestId, { ok: false, error: { code: 'OPERATION_FAILED', message: this.status.message ?? 'Runtime is not ready.' } }));
+      return;
+    }
     try {
       const result = dispatchRuntimeOperation(parsed.operation, parsed.args, this.runtime);
       this.send(resultResponse(parsed.requestId, result));
