@@ -47,6 +47,26 @@ Restart `pnpm dev`, then select **AI generation** in the prompt composer. The se
 
 Credentials never enter browser storage, client bundles, project files, or exports. API requests reject other Origins, bound input size, and rate-limit generation. Real provider access requires a valid key and an available model. The integration is tested with simulated provider responses; it is not a guarantee of account access.
 
+### Custom LLM providers
+
+Configure a server-side `.env` with an OpenAI-compatible provider:
+
+```dotenv
+LLM_API_KEY=your-provider-key
+LLM_BASE_URL=https://provider.example/v1
+LLM_MODEL=your-provider-model-id
+LLM_API_STYLE=chat_completions
+LLM_JSON_MODE=json_schema
+```
+
+`LLM_*` values take precedence over `OPENAI_API_KEY` / `OPENAI_MODEL`. `OPENAI_BASE_URL` is also accepted when `LLM_BASE_URL` is unset. Supply the API root (including `/v1` when required), without an endpoint suffix. `responses` appends `/responses`; `chat_completions` appends `/chat/completions` and uses that protocol's messages and response shape.
+
+Use `LLM_JSON_MODE=json_schema` for strict structured outputs. If the provider rejects it, try `json_object`; if JSON mode is unsupported too, use `prompt`. All modes still parse/validate the result and allow one repair attempt. Provider-specific native APIs require an OpenAI-compatible endpoint or gateway.
+
+For a local compatible server, use a loopback URL such as `http://127.0.0.1:1234/v1`, its installed model ID, and a dummy key such as `local` if it does not require authentication. Remote URLs require HTTPS; credentials and query strings in base URLs are rejected. Only server configuration can choose the provider endpoint.
+
+Restart the running dev/preview server after changes. API credentials must not use a `VITE_` prefix. `.env` and `.env.*` are ignored by Git; `.env.example` contains placeholders only. The coding agent's own LLM/provider settings are separate from LoreCraft's generation settings.
+
 The Vite API plugin supports both `pnpm dev` and `pnpm preview`. A purely static deployment retains local generation and exports; AI mode requires a server running this API. This is a single-device creator studio, not a multi-user hosted service.
 
 ## Studio features
@@ -117,7 +137,10 @@ Same-OS-user Node processes may omit Origin and remain trusted. The newest accep
 
 | Environment variable | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | Optional server-side AI generation |
+| `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` | OpenAI-compatible server-side generation defaults |
+| `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | Custom provider settings; override OpenAI defaults |
+| `LLM_API_STYLE` | `responses` or `chat_completions` |
+| `LLM_JSON_MODE` | `json_schema`, `json_object`, or `prompt` |
 | `BRIDGE_PORT` | Relay port; default 8787 |
 | `LORECRAFT_VITE_PORT` | Managed Vite port; default 5173 |
 | `MCP_BRIDGE_URL` | Node client relay URL; match custom relay ports |

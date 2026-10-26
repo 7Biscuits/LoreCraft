@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { compilePrompt, examples, gameSpecSchema, parseProject } from './spec';
 import { createGameEngine } from './engine';
 import { playtest } from './playtest';
-import { generateGame } from './api';
+import { generateGame, generatorOptionsFromEnv } from './api';
 import { exportHtml } from './export';
 
 test('sample prompts produce distinct playable genres and themes with all gameplay checks passing', () => {
@@ -58,6 +58,43 @@ test('AI generation validates structured responses, repairs once, and never expo
     }) as typeof fetch,
   });
   assert.equal(calls, 2); assert.equal(result.source, 'ai'); assert.equal(result.spec.genre, 'shooter'); assert.ok(result.notes.length); assert.ok(!JSON.stringify(result).includes('test-only-key'));
+});
+
+test('custom provider environment variables take precedence and invalid modes fail early', () => {
+  const options = generatorOptionsFromEnv({ OPENAI_API_KEY: 'old', OPENAI_MODEL: 'old-model', LLM_API_KEY: 'custom', LLM_BASE_URL: 'https://provider.example/v1/', LLM_MODEL: 'custom-model', LLM_API_STYLE: 'chat_completions', LLM_JSON_MODE: 'json_object' });
+  assert.equal(options.apiKey, 'custom'); assert.equal(options.model, 'custom-model'); assert.equal(options.apiStyle, 'chat_completions');
+  assert.equal(generatorOptionsFromEnv({ OPENAI_BASE_URL: 'https://proxy.example/v1' }).baseUrl, 'https://proxy.example/v1');
+  assert.throws(() => generatorOptionsFromEnv({ LLM_API_STYLE: 'invalid' }));
+});
+
+test('custom Chat Completions provider supports strict schema, JSON mode, and prompt-only JSON', async () => {
+  for (const jsonMode of ['json_schema', 'json_object', 'prompt'] as const) {
+    const result = await generateGame({ prompt: 'an ocean runner', mode: 'ai' }, {
+      apiKey: 'custom-secret', baseUrl: 'https://provider.example/v1/', model: 'custom-model', apiStyle: 'chat_completions', jsonMode,
+      fetch: (async (url, init) => {
+        assert.equal(url, 'https://provider.example/v1/chat/completions');
+        assert.equal((init!.headers as Record<string, string>).Authorization, 'Bearer custom-secret');
+        const body = JSON.parse(init!.body as string); assert.equal(body.model, 'custom-model'); assert.equal(body.messages[0].role, 'system'); assert.equal(body.stream, false); assert.equal(body.store, undefined);
+        if (jsonMode === 'prompt') assert.equal(body.response_format, undefined);
+        else { assert.equal(body.response_format.type, jsonMode); if (jsonMode === 'json_schema') assert.equal(body.response_format.json_schema.strict, true); }
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(compilePrompt('an ocean runner')) } }] }));
+      }) as typeof fetch,
+    });
+    assert.equal(result.source, 'ai'); assert.equal(result.spec.theme, 'ocean'); assert.ok(!JSON.stringify(result).includes('custom-secret'));
+  }
+});
+
+test('custom Responses roots and loopback model servers are supported, unsafe URL forms are rejected', async () => {
+  for (const baseUrl of ['https://provider.example/v1', 'http://127.0.0.1:1234/v1']) {
+    const result = await generateGame({ prompt: 'a forest adventure', mode: 'ai' }, {
+      apiKey: 'test', baseUrl,
+      fetch: (async (url) => { assert.equal(url, `${baseUrl}/responses`); return new Response(JSON.stringify({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(compilePrompt('forest adventure')) }] }] })); }) as typeof fetch,
+    });
+    assert.equal(result.source, 'ai');
+  }
+  for (const baseUrl of ['http://remote.example/v1', 'https://user:secret@provider.example/v1', 'https://provider.example/v1?api_key=secret', 'https://provider.example/v1/responses']) {
+    await assert.rejects(generateGame({ prompt: 'a forest adventure', mode: 'ai' }, { apiKey: 'test', baseUrl, fetch: (async () => { throw new Error('Must not send the request.'); }) as typeof fetch }), /LLM_BASE_URL/);
+  }
 });
 
 test('entity deletion, damage, and checkpoints have explicit recoverable outcomes', () => {

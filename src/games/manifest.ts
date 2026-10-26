@@ -2,6 +2,7 @@
 export const gameCatalog: readonly { id: string; title: string; entry: string; exportName: string }[] = [
   { id: 'maze-escape', title: 'Maze Escape', entry: './maze-escape/index.ts', exportName: 'mazeEscapeGame' },
   { id: 'generated-game', title: 'Moonlit Grove', entry: './generated-game/index.ts', exportName: 'generatedGame' },
+  { id: 'super-mario', title: 'Super Mario Bros (World 1-1)', entry: './super-mario/index.ts', exportName: 'superMarioGame' },
 ];
 
 export const defaultGameId = 'maze-escape';

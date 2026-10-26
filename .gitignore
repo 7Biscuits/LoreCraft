@@ -2,3 +2,6 @@ node_modules/
 dist/
 .lorecraft/
 .agents/mcp_config.json
+.env
+.env.*
+!.env.example
