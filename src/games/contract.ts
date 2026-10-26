@@ -1,5 +1,5 @@
 import type { EntityRegistry, GameRuntime } from '../runtime';
-import type { ApiResult, CreateEntityArgs, EntityState } from '../runtime';
+import type { ApiResult, CreateEntityArgs, EntityState, GameModuleState, Position2D } from '../runtime';
 
 /**
  * The small contract used by source-authored games in `src/games/<game-id>`.
@@ -10,10 +10,18 @@ export interface GameModule {
   readonly id: string;
   readonly title: string;
   init(context: GameContext): void;
-  update(): void;
+  update(frame: GameFrame): void;
   render(): void;
   reset(): void;
   destroy(): void;
+  getState?(): GameModuleState;
+}
+
+/** Engine input is sampled once by the host; gameplay can also be driven deterministically. */
+export interface GameFrame {
+  deltaSeconds: number;
+  movement: Position2D;
+  restart: boolean;
 }
 
 export interface GameContext {
@@ -40,5 +48,6 @@ export function validateGameModule(game: Partial<GameModule>): GameModuleValidat
   for (const method of ['init', 'update', 'render', 'reset', 'destroy'] as const) {
     if (typeof game[method] !== 'function') errors.push(`Game module must implement ${method}().`);
   }
+  if (game.getState !== undefined && typeof game.getState !== 'function') errors.push('getState must be a function.');
   return { ok: errors.length === 0, errors };
 }

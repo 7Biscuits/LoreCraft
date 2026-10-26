@@ -39,7 +39,11 @@ export interface GameStateSnapshot {
   mode: string;
   score: number;
   entities: EntityState[];
+  state?: GameModuleState;
 }
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type GameModuleState = Record<string, JsonValue>;
 
 export interface ApiSuccess<T> {
   ok: true;

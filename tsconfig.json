@@ -7,7 +7,7 @@
     "skipLibCheck": true,
     "moduleResolution": "bundler",
     "types": ["vite/client", "node"],
-    "allowImportingTsExtensions": false,
+    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
     "strict": true,
@@ -15,6 +15,5 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": ["src", "vite.config.ts"]
 }

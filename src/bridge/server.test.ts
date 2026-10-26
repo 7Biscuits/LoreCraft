@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import WebSocket from 'ws';
+import { once } from 'node:events';
+import { createConnection } from 'node:net';
 import { RuntimeBridgeServer } from './server';
 
 type Message = Record<string, unknown>;
 
 async function startServer(timeout = 100): Promise<RuntimeBridgeServer> {
-  const server = new RuntimeBridgeServer({ port: 0, requestTimeoutMs: timeout, log: () => undefined });
-  for (let attempts = 0; !server.port && attempts < 20; attempts++) await delay(5);
-  if (!server.port) throw new Error('Bridge server did not start.');
+  const server = new RuntimeBridgeServer({ port: 0, token: 'test-token', requestTimeoutMs: timeout, shutdownTimeoutMs: 30, log: () => undefined });
+  await server.ready;
   return server;
 }
 
 async function connect(server: RuntimeBridgeServer): Promise<WebSocket> {
-  const socket = new WebSocket(`ws://127.0.0.1:${server.port}`);
+  const socket = new WebSocket(`ws://127.0.0.1:${server.port}`, { headers: { Authorization: 'Bearer test-token' } });
   await new Promise<void>((resolve, reject) => {
     socket.once('open', resolve);
     socket.once('error', reject);
@@ -44,10 +45,6 @@ function send(socket: WebSocket, message: Message): void {
 async function closeSocket(socket: WebSocket): Promise<void> {
   if (socket.readyState === WebSocket.CLOSED) return;
   await new Promise<void>((resolve) => { socket.once('close', resolve); socket.close(); });
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 test('routes a runtime response to the matching client request', async () => {
@@ -117,4 +114,61 @@ test('fails pending client requests when the browser runtime disconnects', async
     await closeSocket(client);
     await server.close();
   }
+});
+
+test('rejects missing tokens and untrusted origins before accepting a connection', async () => {
+  const server = await startServer();
+  try {
+    for (const options of [
+      {},
+      { headers: { Authorization: 'Bearer wrong-token' } },
+      { origin: 'https://untrusted.example', headers: { Authorization: 'Bearer test-token' } },
+      { origin: 'http://localhost:5173.untrusted.example', headers: { Authorization: 'Bearer test-token' } },
+    ]) {
+      const socket = new WebSocket(`ws://127.0.0.1:${server.port}`, options);
+      await assert.rejects(once(socket, 'open'), /Unexpected server response: 40[13]/);
+    }
+    const trusted = new WebSocket(`ws://127.0.0.1:${server.port}`, {
+      origin: 'http://localhost:5173', headers: { Authorization: 'Bearer test-token' },
+    });
+    await once(trusted, 'open');
+    await closeSocket(trusted);
+  } finally { await server.close(); }
+});
+
+test('runtime replacement immediately fails requests assigned to the old runtime', async () => {
+  const server = await startServer(1_000);
+  const runtime = await connect(server);
+  const client = await connect(server);
+  try {
+    send(runtime, { kind: 'hello', role: 'runtime' });
+    send(client, { kind: 'hello', role: 'client' });
+    const forwarded = nextMessage(runtime);
+    const response = nextMessage(client);
+    send(client, { kind: 'request', requestId: 'replacement', operation: 'getGameState', args: {} });
+    await forwarded;
+    const replacement = await connect(server);
+    send(replacement, { kind: 'hello', role: 'runtime' });
+    assert.deepEqual((await response).error, { code: 'RUNTIME_DISCONNECTED', message: 'Browser game runtime was replaced.' });
+    const nextRequest = nextMessage(replacement);
+    send(client, { kind: 'request', requestId: 'new-runtime', operation: 'getGameState', args: {} });
+    assert.equal((await nextRequest).requestId, 'new-runtime');
+    await closeSocket(replacement);
+  } finally { await server.close(); }
+});
+
+test('shutdown closes connected clients and terminates an unresponsive peer', { timeout: 2_000 }, async () => {
+  const server = await startServer();
+  const socket = await connect(server);
+  const unfinishedHandshake = createConnection({ host: '127.0.0.1', port: server.port });
+  unfinishedHandshake.on('error', (error: NodeJS.ErrnoException) => assert.equal(error.code, 'ECONNRESET'));
+  await once(unfinishedHandshake, 'connect');
+  unfinishedHandshake.write('GET / HTTP/1.1\r\nHost: localhost\r\n');
+  // Stop reading to simulate a client that never answers the close frame.
+  socket.pause();
+  const closing = server.close();
+  assert.equal(server.close(), closing);
+  await closing;
+  socket.terminate();
+  unfinishedHandshake.destroy();
 });

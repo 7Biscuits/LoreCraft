@@ -7,9 +7,10 @@
     "dev": "vite",
     "bridge": "tsx src/bridge/server.ts",
     "mcp": "tsx src/mcp/server.ts",
+    "setup:mcp": "node scripts/configure-mcp.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts",
+    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts scripts/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

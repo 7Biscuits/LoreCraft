@@ -3,10 +3,10 @@ import { BrowserRuntimeBridge } from './bridge/browserBridge';
 import { activeGame } from './games/catalog';
 import { startAuthoredGame } from './games/host';
 
-const runtime = startAuthoredGame(activeGame);
-const bridgeUrl = import.meta.env.VITE_RUNTIME_WS_URL ?? `ws://${window.location.hostname || '127.0.0.1'}:8787`;
+const bridgeUrl = new URL('/runtime-bridge', window.location.href);
+bridgeUrl.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 
-new BrowserRuntimeBridge(runtime, {
-  url: bridgeUrl,
+void startAuthoredGame(activeGame).then((runtime) => new BrowserRuntimeBridge(runtime, {
+  url: bridgeUrl.href,
   onStatus: (message) => console.info(`[runtime bridge] ${message}`),
-}).connect();
+}).connect()).catch((error: unknown) => console.error('Game initialization failed:', error));

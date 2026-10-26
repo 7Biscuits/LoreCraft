@@ -1,6 +1,5 @@
-import type { GameRuntime } from '../runtime';
-import { dispatchRuntimeOperation, isBridgeError, parseBridgeMessage, resultResponse } from './protocol';
-import type { BridgeMessage, BridgeResponse } from './protocol';
+import { bridgeCloseCodes, dispatchRuntimeOperation, isBridgeError, parseBridgeMessage, resultResponse } from './protocol';
+import type { BridgeMessage, BridgeResponse, RuntimeOperations } from './protocol';
 
 export interface BrowserBridgeOptions {
   url: string;
@@ -19,7 +18,7 @@ export class BrowserRuntimeBridge {
   private readonly reconnectDelayMs: number;
 
   constructor(
-    private readonly runtime: GameRuntime,
+    private readonly runtime: RuntimeOperations,
     private readonly options: BrowserBridgeOptions,
   ) {
     this.WebSocketConstructor = options.WebSocketConstructor ?? WebSocket;
@@ -27,18 +26,34 @@ export class BrowserRuntimeBridge {
   }
 
   connect(): void {
+    this.stopped = false;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.open();
+  }
+
+  private open(): void {
     if (this.stopped || this.socket?.readyState === this.WebSocketConstructor.OPEN || this.socket?.readyState === this.WebSocketConstructor.CONNECTING) return;
     const socket = new this.WebSocketConstructor(this.options.url);
     this.socket = socket;
     socket.addEventListener('open', () => {
+      if (this.stopped || this.socket !== socket) { socket.close(); return; }
       this.send({ kind: 'hello', role: 'runtime' });
       this.reportStatus('Runtime bridge connected.');
     });
-    socket.addEventListener('message', (event) => this.handleMessage(event.data));
-    socket.addEventListener('close', () => {
+    socket.addEventListener('message', (event) => {
+      if (this.socket === socket && !this.stopped) this.handleMessage(event.data);
+    });
+    socket.addEventListener('close', (event) => {
+      if (this.socket !== socket) return;
+      this.socket = undefined;
+      if (event.code === bridgeCloseCodes.runtimeReplaced) {
+        this.stopped = true;
+        this.reportStatus('Runtime bridge replaced by another game tab.');
+        return;
+      }
       if (!this.stopped) {
         this.reportStatus('Runtime bridge disconnected; reconnecting.');
-        this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelayMs);
+        this.reconnectTimer = setTimeout(() => this.open(), this.reconnectDelayMs);
       }
     });
     socket.addEventListener('error', () => this.reportStatus('Runtime bridge socket error.'));
@@ -53,8 +68,14 @@ export class BrowserRuntimeBridge {
   private handleMessage(raw: unknown): void {
     const parsed = parseJsonMessage(raw);
     if (!parsed || isBridgeError(parsed) || parsed.kind !== 'request') return;
-    const result = dispatchRuntimeOperation(parsed.operation, parsed.args, this.runtime);
-    this.send(resultResponse(parsed.requestId, result));
+    try {
+      const result = dispatchRuntimeOperation(parsed.operation, parsed.args, this.runtime);
+      this.send(resultResponse(parsed.requestId, result));
+    } catch (cause) {
+      this.send(resultResponse(parsed.requestId, {
+        ok: false, error: { code: 'OPERATION_FAILED', message: cause instanceof Error ? cause.message : 'Runtime operation failed.' },
+      }));
+    }
   }
 
   private send(message: BridgeMessage | BridgeResponse): void {

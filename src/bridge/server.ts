@@ -1,31 +1,66 @@
 import { WebSocket, WebSocketServer } from 'ws';
-import { bridgeError, errorResponse, parseBridgeMessage } from './protocol';
+import { pathToFileURL } from 'node:url';
+import { createServer } from 'node:http';
+import type { Socket } from 'node:net';
+import { defaultBridgeOrigins, hasBridgeAccess, loadOrCreateBridgeToken } from './access';
+import { bridgeCloseCodes, bridgeError, errorResponse, parseBridgeMessage } from './protocol';
 import type { BridgeError, BridgeRequest, BridgeResponse } from './protocol';
 
 export interface BridgeServerOptions {
   port?: number;
   requestTimeoutMs?: number;
+  shutdownTimeoutMs?: number;
+  token?: string;
+  allowedOrigins?: readonly string[];
   log?: (message: string) => void;
 }
 
 type ClientRole = 'runtime' | 'client' | undefined;
-type PendingRequest = { client: WebSocket; timer: ReturnType<typeof setTimeout> };
+type PendingRequest = { client: WebSocket; runtime: WebSocket; timer: ReturnType<typeof setTimeout> };
 
 /** Local relay between one browser game runtime and one or more Node clients. */
 export class RuntimeBridgeServer {
   private readonly server: WebSocketServer;
+  private readonly httpServer = createServer((_request, response) => { response.writeHead(404).end(); });
+  private readonly connections = new Set<Socket>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly roles = new Map<WebSocket, ClientRole>();
   private runtime: WebSocket | undefined;
   private readonly requestTimeoutMs: number;
   private readonly log: (message: string) => void;
+  private readonly shutdownTimeoutMs: number;
+  private closing = false;
+  private closePromise?: Promise<void>;
+  readonly ready: Promise<void>;
 
   constructor(options: BridgeServerOptions = {}) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
     this.log = options.log ?? console.info;
-    this.server = new WebSocketServer({ port: options.port ?? 8787, perMessageDeflate: false });
+    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 1_000;
+    const token = options.token ?? loadOrCreateBridgeToken();
+    if (!token) throw new Error('A non-empty bridge token is required.');
+    const origins = new Set(options.allowedOrigins ?? defaultBridgeOrigins);
+    this.server = new WebSocketServer({
+      server: this.httpServer,
+      perMessageDeflate: false, maxPayload: 64 * 1024,
+      verifyClient: ({ origin, req }, done) => {
+        const authorized = !this.closing && hasBridgeAccess(req.headers.authorization, token);
+        const allowedOrigin = origin === undefined || origins.has(origin);
+        done(authorized && allowedOrigin, authorized ? 403 : 401);
+      },
+    });
+    this.ready = new Promise((resolve, reject) => {
+      this.server.once('listening', resolve);
+      this.server.once('error', reject);
+    });
     this.server.on('connection', (socket) => this.attach(socket));
     this.server.on('listening', () => this.log(`Runtime bridge listening on ws://127.0.0.1:${this.port}`));
+    this.server.on('error', (error) => this.log(`Runtime bridge error: ${error.message}`));
+    this.httpServer.on('connection', (socket) => {
+      this.connections.add(socket);
+      socket.once('close', () => this.connections.delete(socket));
+    });
+    this.httpServer.listen(options.port ?? 8787, '127.0.0.1');
   }
 
   get port(): number {
@@ -34,15 +69,30 @@ export class RuntimeBridgeServer {
   }
 
   close(): Promise<void> {
-    for (const [id, pending] of this.pending) {
-      clearTimeout(pending.timer);
-      this.send(pending.client, errorResponse(id, bridgeError('RUNTIME_DISCONNECTED', 'Runtime bridge server closed.')));
-    }
-    this.pending.clear();
-    return new Promise((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()));
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.failPending('Runtime bridge server closed.');
+    this.closePromise = this.ready.then(() => new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        for (const socket of this.server.clients) socket.terminate();
+        for (const socket of this.connections) socket.destroy();
+      }, this.shutdownTimeoutMs);
+      const closeWebSockets = new Promise<void>((done, fail) => this.server.close((error) => error ? fail(error) : done()));
+      const closeHttp = new Promise<void>((done, fail) => this.httpServer.close((error) => error ? fail(error) : done()));
+      void Promise.all([closeWebSockets, closeHttp]).then(() => {
+        clearTimeout(deadline);
+        resolve();
+      }, (error: unknown) => {
+        clearTimeout(deadline);
+        reject(error);
+      });
+      for (const socket of this.server.clients) socket.close(1001, 'Runtime bridge server closed.');
+    }), () => undefined);
+    return this.closePromise;
   }
 
   private attach(socket: WebSocket): void {
+    if (this.closing) { socket.close(1001); return; }
     this.roles.set(socket, undefined);
     socket.on('message', (data, isBinary) => {
       if (isBinary) return this.reject(socket, '', bridgeError('MALFORMED_MESSAGE', 'Binary messages are not supported.'));
@@ -72,7 +122,10 @@ export class RuntimeBridgeServer {
   private registerRole(socket: WebSocket, role: ClientRole): void {
     if (this.roles.get(socket)) return this.reject(socket, '', bridgeError('MALFORMED_MESSAGE', 'Client role is already registered.'));
     if (role === 'runtime') {
-      if (this.runtime && this.runtime !== socket) this.runtime.close(4000, 'Replaced by a new runtime connection.');
+      if (this.runtime && this.runtime !== socket) {
+        this.failPending('Browser game runtime was replaced.');
+        this.runtime.close(bridgeCloseCodes.runtimeReplaced, 'Replaced by a new runtime connection.');
+      }
       this.runtime = socket;
       this.log('Game runtime connected.');
     }
@@ -80,6 +133,7 @@ export class RuntimeBridgeServer {
   }
 
   private forwardRequest(client: WebSocket, request: BridgeRequest): void {
+    if (this.closing) return;
     if (this.roles.get(client) !== 'client') return this.reject(client, request.requestId, bridgeError('MALFORMED_MESSAGE', 'Send a client hello before requests.'));
     if (!this.runtime || this.runtime.readyState !== WebSocket.OPEN) {
       return this.reject(client, request.requestId, bridgeError('RUNTIME_UNAVAILABLE', 'No browser game runtime is connected.'));
@@ -93,14 +147,14 @@ export class RuntimeBridgeServer {
       this.pending.delete(request.requestId);
       this.send(pending.client, errorResponse(request.requestId, bridgeError('REQUEST_TIMEOUT', `Request "${request.requestId}" timed out after ${this.requestTimeoutMs}ms.`)));
     }, this.requestTimeoutMs);
-    this.pending.set(request.requestId, { client, timer });
+    this.pending.set(request.requestId, { client, runtime: this.runtime, timer });
     this.send(this.runtime, request);
   }
 
   private forwardResponse(socket: WebSocket, response: BridgeResponse): void {
-    if (this.roles.get(socket) !== 'runtime') return;
+    if (this.runtime !== socket) return;
     const pending = this.pending.get(response.requestId);
-    if (!pending) return;
+    if (!pending || pending.runtime !== socket) return;
     this.pending.delete(response.requestId);
     clearTimeout(pending.timer);
     this.send(pending.client, response);
@@ -112,12 +166,21 @@ export class RuntimeBridgeServer {
     if (role === 'runtime' && this.runtime === socket) {
       this.runtime = undefined;
       this.log('Game runtime disconnected.');
-      for (const [id, pending] of this.pending) {
-        clearTimeout(pending.timer);
-        this.send(pending.client, errorResponse(id, bridgeError('RUNTIME_DISCONNECTED', 'Browser game runtime disconnected.')));
-      }
-      this.pending.clear();
+      this.failPending('Browser game runtime disconnected.');
     }
+    for (const [id, pending] of this.pending) {
+      if (pending.client !== socket) continue;
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+    }
+  }
+
+  private failPending(message: string): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      this.send(pending.client, errorResponse(id, bridgeError('RUNTIME_DISCONNECTED', message)));
+    }
+    this.pending.clear();
   }
 
   private reject(socket: WebSocket, requestId: string, error: BridgeError): void {
@@ -129,10 +192,20 @@ export class RuntimeBridgeServer {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = readPositiveInteger(process.env.BRIDGE_PORT) ?? 8787;
   const requestTimeoutMs = readPositiveInteger(process.env.BRIDGE_REQUEST_TIMEOUT_MS) ?? 5_000;
-  new RuntimeBridgeServer({ port, requestTimeoutMs });
+  const server = new RuntimeBridgeServer({
+    port, requestTimeoutMs,
+    allowedOrigins: process.env.BRIDGE_ALLOWED_ORIGINS?.split(',').map((origin) => origin.trim()),
+  });
+  void server.ready.catch(() => { process.exitCode = 1; });
+  const shutdown = () => { void server.close().catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  }); };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 function readPositiveInteger(value: string | undefined): number | undefined {

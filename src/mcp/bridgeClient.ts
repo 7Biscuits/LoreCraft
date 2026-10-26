@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
+import { readBridgeToken } from '../bridge/access';
 import { parseBridgeMessage } from '../bridge/protocol';
 import type { BridgeError, BridgeOperation, BridgeResponse } from '../bridge/protocol';
 import type { ApiError } from '../runtime';
@@ -7,6 +8,7 @@ import type { ApiError } from '../runtime';
 export interface GameBridgeClientOptions {
   url?: string;
   requestTimeoutMs?: number;
+  token?: string;
   WebSocketConstructor?: typeof WebSocket;
 }
 
@@ -19,87 +21,85 @@ export type GameBridgeResult =
 type PendingRequest = {
   resolve: (result: GameBridgeResult) => void;
   timer: ReturnType<typeof setTimeout>;
+  socket?: WebSocket;
 };
 
 /** MCP-facing WebSocket client. It speaks only the existing runtime bridge protocol. */
 export class GameBridgeClient {
   private socket: WebSocket | undefined;
-  private connecting: Promise<void> | undefined;
+  private connecting: Promise<WebSocket> | undefined;
+  private closed = false;
+  private closePromise?: Promise<void>;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly url: string;
   private readonly requestTimeoutMs: number;
   private readonly WebSocketConstructor: typeof WebSocket;
+  private readonly token: string | undefined;
 
   constructor(options: GameBridgeClientOptions = {}) {
     this.url = options.url ?? process.env.MCP_BRIDGE_URL ?? 'ws://127.0.0.1:8787';
     this.requestTimeoutMs = options.requestTimeoutMs ?? readPositiveInteger(process.env.MCP_BRIDGE_TIMEOUT_MS) ?? 5_000;
     this.WebSocketConstructor = options.WebSocketConstructor ?? WebSocket;
+    this.token = options.token;
   }
 
-  async request(operation: BridgeOperation, args: Record<string, unknown>): Promise<GameBridgeResult> {
-    try {
-      await this.ensureConnected();
-    } catch (cause) {
-      return { ok: false, error: connectionError(cause) };
-    }
-
-    const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return { ok: false, error: { code: 'BRIDGE_CONNECTION_FAILED', message: 'Unable to connect to the game bridge.' } };
-    }
-
+  request(operation: BridgeOperation, args: Record<string, unknown>): Promise<GameBridgeResult> {
+    if (this.closed) return Promise.resolve({ ok: false, error: connectionError(new Error('Client is closed.')) });
     const requestId = randomUUID();
     return new Promise<GameBridgeResult>((resolve) => {
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        resolve({ ok: false, error: { code: 'REQUEST_TIMEOUT', message: `MCP request timed out after ${this.requestTimeoutMs}ms.` } });
+        this.finish(requestId, { ok: false, error: { code: 'REQUEST_TIMEOUT', message: `MCP request timed out after ${this.requestTimeoutMs}ms.` } });
       }, this.requestTimeoutMs);
       this.pending.set(requestId, { resolve, timer });
-      socket.send(JSON.stringify({ kind: 'request', requestId, operation, args }), (error) => {
-        if (!error) return;
+      void this.ensureConnected().then((socket) => {
         const pending = this.pending.get(requestId);
         if (!pending) return;
-        clearTimeout(pending.timer);
-        this.pending.delete(requestId);
-        pending.resolve({ ok: false, error: connectionError(error) });
-      });
+        pending.socket = socket;
+        socket.send(JSON.stringify({ kind: 'request', requestId, operation, args }), (error) => {
+          if (error) this.finish(requestId, { ok: false, error: connectionError(error) });
+        });
+      }).catch((cause: unknown) => this.finish(requestId, { ok: false, error: connectionError(cause) }));
     });
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closed = true;
     this.rejectPending({ code: 'BRIDGE_CONNECTION_FAILED', message: 'MCP bridge client closed.' });
-    if (!this.socket || this.socket.readyState === WebSocket.CLOSED) return;
-    await new Promise<void>((resolve) => {
-      this.socket?.once('close', () => resolve());
-      this.socket?.close();
+    const socket = this.socket;
+    this.closePromise = new Promise<void>((resolve) => {
+      if (!socket || socket.readyState === WebSocket.CLOSED) return resolve();
+      socket.once('close', resolve);
+      socket.terminate();
     });
+    return this.closePromise;
   }
 
-  private ensureConnected(): Promise<void> {
-    if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+  private async ensureConnected(): Promise<WebSocket> {
+    if (this.closed) throw new Error('Client is closed.');
+    if (this.socket?.readyState === WebSocket.OPEN) return this.socket;
     if (this.connecting) return this.connecting;
 
-    this.connecting = new Promise<void>((resolve, reject) => {
-      const socket = new this.WebSocketConstructor(this.url);
+    const connecting = new Promise<WebSocket>((resolve, reject) => {
+      const socket = new this.WebSocketConstructor(this.url, {
+        headers: { Authorization: `Bearer ${this.token ?? readBridgeToken()}` },
+        handshakeTimeout: this.requestTimeoutMs,
+      });
       this.socket = socket;
       socket.once('open', () => {
-        socket.send(JSON.stringify({ kind: 'hello', role: 'client' }));
-        this.connecting = undefined;
-        resolve();
+        socket.send(JSON.stringify({ kind: 'hello', role: 'client' }), (error) => error ? reject(error) : resolve(socket));
       });
-      socket.once('error', (error) => {
-        this.connecting = undefined;
-        reject(error);
-      });
+      socket.on('error', reject);
       socket.on('message', (data) => this.handleMessage(data.toString()));
       socket.on('close', () => {
+        reject(new Error('The game bridge connection closed.'));
         if (this.socket === socket) this.socket = undefined;
-        this.connecting = undefined;
-        this.rejectPending({ code: 'RUNTIME_DISCONNECTED', message: 'The game bridge connection closed.' });
+        this.rejectPending({ code: 'RUNTIME_DISCONNECTED', message: 'The game bridge connection closed.' }, socket);
       });
-      socket.on('error', () => undefined);
     });
-    return this.connecting;
+    this.connecting = connecting;
+    try { return await connecting; }
+    finally { if (this.connecting === connecting) this.connecting = undefined; }
   }
 
   private handleMessage(text: string): void {
@@ -113,19 +113,23 @@ export class GameBridgeClient {
   private handleResponse(response: BridgeResponse): void {
     const pending = this.pending.get(response.requestId);
     if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pending.delete(response.requestId);
-    pending.resolve(response.ok
+    this.finish(response.requestId, response.ok
       ? { ok: true, result: response.result }
       : { ok: false, error: response.error ?? { code: 'MALFORMED_MESSAGE', message: 'Bridge returned an invalid error response.' } });
   }
 
-  private rejectPending(error: ClientError): void {
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.resolve({ ok: false, error });
+  private finish(id: string, result: GameBridgeResult): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(id);
+    pending.resolve(result);
+  }
+
+  private rejectPending(error: ClientError, socket?: WebSocket): void {
+    for (const [id, pending] of this.pending) {
+      if (!socket || pending.socket === socket) this.finish(id, { ok: false, error });
     }
-    this.pending.clear();
   }
 }
 

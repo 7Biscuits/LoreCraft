@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { pathToFileURL } from 'node:url';
 import * as z from 'zod/v4';
 import { GameBridgeClient } from './bridgeClient';
 import type { GameBridgeResult } from './bridgeClient';
@@ -50,6 +51,7 @@ export function createMcpServer(bridge = new GameBridgeClient()): McpServer {
     { name: 'lorecraft-game', version: '0.1.0' },
     { instructions: 'These tools control only the currently running Lorecraft game through its local runtime bridge.' },
   );
+  server.server.onclose = () => { void bridge.close(); };
 
   server.registerTool('create_entity', {
     description: 'Create a player, coin, enemy, or obstacle in the running game.',
@@ -76,7 +78,7 @@ export function createMcpServer(bridge = new GameBridgeClient()): McpServer {
     inputSchema: toolSchemas.deleteEntity,
   }, (args) => callGame(bridge, 'deleteEntity', args));
   server.registerTool('get_game_state', {
-    description: 'Get the active game mode, score, and entity snapshot.',
+    description: 'Get the active game mode, score, entities, and game-specific state such as objectives and win/loss outcome.',
     inputSchema: toolSchemas.getGameState,
   }, (args) => callGame(bridge, 'getGameState', args));
   server.registerTool('reset_game', {
@@ -100,9 +102,12 @@ function toToolResult(result: GameBridgeResult) {
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  void serveStdio(() => createMcpServer(), {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const handle = serveStdio(() => createMcpServer(), {
     onerror: (error) => console.error('[lorecraft-mcp]', error.message),
   });
+  const shutdown = () => { void handle.close(); };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   console.error('Lorecraft MCP server running on stdio.');
 }

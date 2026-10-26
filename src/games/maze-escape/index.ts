@@ -1,12 +1,12 @@
-import { Color, EngineObject, drawRect, drawTextScreen, keyDirection, keyIsDown, keyWasPressed, mainCanvasSize, timeDelta, vec2 } from 'littlejsengine';
-import type { GameContext, GameModule } from '../contract';
+import { Color, EngineObject, drawRect, drawTextScreen, mainCanvasSize, vec2 } from 'littlejsengine';
+import type { EntityType, GameModuleState, ManagedEntity } from '../../runtime';
+import type { GameContext, GameFrame, GameModule } from '../contract';
 import { mazeConfig } from './config';
 
 type Outcome = 'playing' | 'won' | 'lost';
 
 const palette = {
   floor: new Color(0.1, 0.16, 0.26),
-  wall: new Color(0.31, 0.41, 0.57),
   key: new Color(1, 0.8, 0.2),
   exitLocked: new Color(0.7, 0.24, 0.34),
   exitOpen: new Color(0.32, 0.9, 0.54),
@@ -15,7 +15,7 @@ const palette = {
 };
 
 /** A source-authored top-down game: collect a key, unlock the exit, and evade the sentinel. */
-class MazeEscapeGame implements GameModule {
+export class MazeEscapeGame implements GameModule {
   readonly id = 'maze-escape';
   readonly title = 'Maze Escape';
   private context?: GameContext;
@@ -27,42 +27,40 @@ class MazeEscapeGame implements GameModule {
     this.reset();
   }
 
-  update(): void {
+  update(frame: GameFrame): void {
     if (!this.context) return;
-    if (keyWasPressed('KeyR')) {
+    if (frame.restart) {
       this.context.runtime.resetGame();
       return;
     }
     if (this.outcome !== 'playing') return;
 
     const player = this.object('player-1');
-    const enemy = this.object('enemy-1');
-    if (!player || !enemy) return;
+    if (!player) return;
     const speed = this.context.runtime.getEntity('player-1');
     const moveSpeed = speed.ok ? speed.data.properties.speed : mazeConfig.playerSpeed;
-    // LittleJS normalizes a zero vector upward, so clamp the combined input instead.
-    const movement = keyDirection();
-    movement.x += Number(keyIsDown('KeyD')) - Number(keyIsDown('KeyA'));
-    movement.y += Number(keyIsDown('KeyW')) - Number(keyIsDown('KeyS'));
-    const frameMovement = movement.clampLength(moveSpeed * timeDelta);
+    const frameMovement = vec2(frame.movement.x, frame.movement.y).clampLength().scale(moveSpeed * frame.deltaSeconds);
     this.tryMove(player, frameMovement.x, 0);
     this.tryMove(player, 0, frameMovement.y);
 
-    const key = this.object('key-1');
-    if (key && player.isOverlappingObject(key)) {
-      this.context.runtime.deleteEntity('key-1');
-      this.hasKey = true;
-      this.context.setScore(1);
+    for (const coin of this.entities('coin')) {
+      if (player.isOverlappingObject(coin.object as EngineObject)) {
+        this.context.runtime.deleteEntity(coin.id);
+        this.hasKey = true;
+        this.context.setScore(this.context.getScore() + 1);
+      }
     }
-    this.moveEnemy(enemy, player);
-    if (player.isOverlappingObject(enemy)) this.outcome = 'lost';
-    if (this.hasKey && this.overlapsPoint(player, mazeConfig.exitPosition.x, mazeConfig.exitPosition.y, 1)) this.outcome = 'won';
+    for (const enemy of this.entities('enemy')) {
+      const object = enemy.object as EngineObject;
+      this.moveEnemy(object, player, enemy.getSpeed(), frame.deltaSeconds);
+      if (player.isOverlappingObject(object)) this.outcome = 'lost';
+    }
+    if (this.outcome === 'playing' && this.hasKey && this.overlapsPoint(player, mazeConfig.exitPosition.x, mazeConfig.exitPosition.y, 1)) this.outcome = 'won';
   }
 
   render(): void {
     const half = mazeConfig.halfSize;
     drawRect(vec2(), vec2(half * 2), palette.floor);
-    for (const wall of mazeConfig.walls) drawRect(vec2(wall.x, wall.y), vec2(wall.width, wall.height), palette.wall);
     drawRect(vec2(mazeConfig.exitPosition.x, mazeConfig.exitPosition.y), vec2(1), this.hasKey ? palette.exitOpen : palette.exitLocked);
     const center = mainCanvasSize.scale(0.5);
     drawTextScreen(this.title, vec2(center.x, 28), 28, palette.text);
@@ -81,12 +79,23 @@ class MazeEscapeGame implements GameModule {
     this.outcome = 'playing';
     this.context.setScore(0);
     this.create('player-1', 'player', mazeConfig.playerStart.x, mazeConfig.playerStart.y, 0.75, mazeConfig.playerSpeed);
-    this.create('enemy-1', 'enemy', mazeConfig.enemyStart.x, mazeConfig.enemyStart.y, 0.75);
+    this.create('enemy-1', 'enemy', mazeConfig.enemyStart.x, mazeConfig.enemyStart.y, 0.75, mazeConfig.enemySpeed);
     this.create('key-1', 'coin', mazeConfig.keyPosition.x, mazeConfig.keyPosition.y, 0.45);
+    mazeConfig.walls.forEach((wall, index) => {
+      const result = this.context!.createEntity({
+        id: `wall-${index + 1}`, type: 'obstacle', dimension: '2d',
+        position: { x: wall.x, y: wall.y }, properties: { size: { x: wall.width, y: wall.height } },
+      });
+      if (!result.ok) throw new Error(result.error.message);
+    });
   }
 
   destroy(): void {
-    // The host destroys registry-backed objects before a reset or replacement.
+    this.context = undefined;
+  }
+
+  getState(): GameModuleState {
+    return { hasKey: this.hasKey, outcome: this.outcome };
   }
 
   private create(id: string, type: 'player' | 'coin' | 'enemy', x: number, y: number, size: number, speed?: number): void {
@@ -104,17 +113,24 @@ class MazeEscapeGame implements GameModule {
   private tryMove(player: EngineObject, x: number, y: number): void {
     const previous = player.pos;
     const next = previous.add(vec2(x, y));
-    if (Math.abs(next.x) > mazeConfig.halfSize - 0.5 || Math.abs(next.y) > mazeConfig.halfSize - 0.5) return;
+    if (Math.abs(next.x) > mazeConfig.halfSize - player.size.x / 2 || Math.abs(next.y) > mazeConfig.halfSize - player.size.y / 2) return;
     player.pos = next;
-    if (mazeConfig.walls.some((wall) => this.overlapsPoint(player, wall.x, wall.y, wall.width, wall.height))) player.pos = previous;
+    if (this.isBlocked(player)) player.pos = previous;
   }
 
-  private moveEnemy(enemy: EngineObject, player: EngineObject): void {
+  private moveEnemy(enemy: EngineObject, player: EngineObject, speed: number, deltaSeconds: number): void {
     const delta = player.pos.subtract(enemy.pos);
-    const step = delta.normalize(mazeConfig.enemySpeed * timeDelta);
-    const previous = enemy.pos;
-    enemy.pos = previous.add(step);
-    if (mazeConfig.walls.some((wall) => this.overlapsPoint(enemy, wall.x, wall.y, wall.width, wall.height))) enemy.pos = previous;
+    const step = delta.clampLength(speed * deltaSeconds);
+    this.tryMove(enemy, step.x, 0);
+    this.tryMove(enemy, 0, step.y);
+  }
+
+  private entities(type: EntityType): ManagedEntity[] {
+    return this.context?.registry.list().filter((entity) => entity.type === type && entity.dimension === '2d') ?? [];
+  }
+
+  private isBlocked(object: EngineObject): boolean {
+    return this.entities('obstacle').some((obstacle) => object.isOverlappingObject(obstacle.object as EngineObject));
   }
 
   private overlapsPoint(object: EngineObject, x: number, y: number, width = 1, height = width): boolean {

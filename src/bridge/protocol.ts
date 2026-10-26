@@ -14,6 +14,8 @@ export const bridgeOperations = [
 export type BridgeOperation = typeof bridgeOperations[number];
 export type BridgeRole = 'runtime' | 'client';
 
+export const bridgeCloseCodes = { runtimeReplaced: 4000 } as const;
+
 export interface BridgeHello {
   kind: 'hello';
   role: BridgeRole;

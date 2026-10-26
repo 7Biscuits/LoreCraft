@@ -1,6 +1,8 @@
 export { EntityRegistry } from './entityRegistry';
 export { GameRuntime } from './gameRuntime';
 export type {
+  GameModuleState,
+  JsonValue,
   ApiError,
   ApiResult,
   ApiSuccess,

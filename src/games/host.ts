@@ -4,13 +4,15 @@ import {
   EngineObject3D,
   Render3DPlugin,
   buildBox,
-  drawRect,
   engineInit,
+  keyDirection,
+  keyWasPressed,
   render3D,
   setCameraPos,
   setCameraScale,
   setCanvasClearColor,
   setEngineVariableStep,
+  timeDelta,
   vec2,
   vec3,
 } from 'littlejsengine';
@@ -32,16 +34,14 @@ class RuntimeRectangle extends EngineObject {
     this.color = color;
     this.gravityScale = 0;
   }
-
-  override render(): void {
-    drawRect(this.pos, this.size, this.color);
-  }
 }
 
 /** Runs one authored module through LittleJS's existing engine lifecycle. */
 export class AuthoredGameHost {
   private score = 0;
   private initialized = false;
+  private startPromise?: Promise<GameRuntime>;
+  private renderer3DReady = false;
   private readonly registry = new EntityRegistry();
   readonly runtime: GameRuntime;
   private readonly context: GameContext;
@@ -51,7 +51,7 @@ export class AuthoredGameHost {
     if (!validation.ok) throw new Error(`Invalid game module: ${validation.errors.join(' ')}`);
     this.runtime = new GameRuntime(this.registry, {
       createEntity: (args) => this.createRuntimeEntity(args),
-      getGameState: () => ({ mode: game.id, score: this.score }),
+      getGameState: () => ({ mode: game.id, score: this.score, state: game.getState?.() ?? {} }),
       resetGame: () => this.reset(),
     });
     this.context = {
@@ -67,14 +67,23 @@ export class AuthoredGameHost {
     };
   }
 
-  start(): GameRuntime {
-    void engineInit(
+  start(): Promise<GameRuntime> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = engineInit(
       () => this.init(),
-      () => this.game.update(),
+      () => {
+        if (this.initialized) this.game.update({ deltaSeconds: timeDelta, movement: keyDirection(), restart: keyWasPressed('KeyR') });
+      },
       undefined,
-      () => this.game.render(),
-    );
-    return this.runtime;
+      () => { if (this.initialized) this.game.render(); },
+    ).then(() => this.runtime);
+    return this.startPromise;
+  }
+
+  destroy(): void {
+    this.initialized = false;
+    try { this.game.destroy(); }
+    finally { this.clearEntities(); }
   }
 
   private init(): void {
@@ -83,19 +92,24 @@ export class AuthoredGameHost {
     setCameraScale(48);
     setCanvasClearColor(new Color(0.05, 0.08, 0.14));
 
-    // Keep 3D entities created through the existing runtime adapter supported.
-    new Render3DPlugin();
-    render3D.camera.pos = vec3(0, 10, 13);
-    render3D.camera.lookAt(vec3());
-    this.initialized = true;
-    this.game.init(this.context);
+    try {
+      this.game.init(this.context);
+      this.initialized = true;
+    } catch (error) {
+      this.destroy();
+      throw error;
+    }
   }
 
   private reset(): void {
-    if (!this.initialized) return;
-    for (const entity of this.registry.list()) this.runtime.deleteEntity(entity.id);
+    if (!this.initialized) throw new Error('The game is not initialized.');
+    this.clearEntities();
     this.score = 0;
     this.game.reset();
+  }
+
+  private clearEntities(): void {
+    for (const entity of this.registry.list()) this.runtime.deleteEntity(entity.id);
   }
 
   private createRuntimeEntity(args: CreateEntityArgs): ApiResult<ManagedEntity> {
@@ -107,6 +121,13 @@ export class AuthoredGameHost {
     const size = args.properties?.size ?? this.defaultSize(args.type, '3d');
     if (!('z' in args.position) || !('z' in size)) {
       return { ok: false, error: { code: 'INVALID_ARGUMENT', message: '3d entities require z coordinates.' } };
+    }
+    // A 2D game needs no 3D renderer or editor plugins. Initialize on first use.
+    if (!this.renderer3DReady) {
+      new Render3DPlugin();
+      render3D.camera.pos = vec3(0, 10, 13);
+      render3D.camera.lookAt(vec3());
+      this.renderer3DReady = true;
     }
     const object = new EngineObject3D(vec3(args.position.x, args.position.y, args.position.z), buildBox(), undefined, colors[args.type]);
     object.scale3D = vec3(size.x, size.y, size.z);
@@ -155,6 +176,6 @@ export class AuthoredGameHost {
   }
 }
 
-export function startAuthoredGame(game: GameModule): GameRuntime {
+export function startAuthoredGame(game: GameModule): Promise<GameRuntime> {
   return new AuthoredGameHost(game).start();
 }
