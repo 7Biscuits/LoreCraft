@@ -80,7 +80,7 @@ if (parameters.has('stopped')) {
   });
   void Promise.all([loadGame(parameters.get('game') ?? defaultGameId), import('./games/host')]).then(async ([game, { AuthoredGameHost }]) => {
     if (disposed) return;
-    host = new AuthoredGameHost(game, reportError);
+    host = new AuthoredGameHost(game, reportError, embedded ? { width: 960, height: 560 } : undefined);
     const runtime = await host.start();
     Object.assign(runtime, inspectionOperations(host, 'spec' in game ? () => ({ checks: playtest((game as GeneratedGame).spec) }) : undefined));
     // Wait for an actual rendered frame before claiming the embedded game is ready.

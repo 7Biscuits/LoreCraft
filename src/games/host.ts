@@ -11,6 +11,7 @@ import {
   setCameraPos,
   setCameraScale,
   setCanvasClearColor,
+  setCanvasFixedSize,
   setEngineVariableStep,
   setEngineManualStep,
   engineStep,
@@ -54,7 +55,7 @@ export class AuthoredGameHost {
   readonly runtime: GameRuntime;
   private readonly context: GameContext;
 
-  constructor(private readonly game: GameModule, private readonly onError?: (error: unknown) => void) {
+  constructor(private readonly game: GameModule, private readonly onError?: (error: unknown) => void, private readonly canvasSize?: { width: number; height: number }) {
     const validation = validateGameModule(game);
     if (!validation.ok) throw new Error(`Invalid game module: ${validation.errors.join(' ')}`);
     this.runtime = new GameRuntime(this.registry, {
@@ -81,6 +82,9 @@ export class AuthoredGameHost {
     if (this.startPromise) return this.startPromise;
     if (engineClaimed) return Promise.reject(new Error('LittleJS already has a host in this document. Reload the document to launch another game.'));
     engineClaimed = true;
+    // The studio may choose a stable logical resolution; game init hooks can
+    // still override it for custom layouts.
+    if (this.canvasSize) setCanvasFixedSize(vec2(this.canvasSize.width, this.canvasSize.height));
     this.startPromise = engineInit(
       () => this.init(),
       () => {

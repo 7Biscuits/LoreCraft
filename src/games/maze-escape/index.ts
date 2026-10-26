@@ -1,4 +1,4 @@
-import { Color, EngineObject, drawRect, drawTextScreen, mainCanvasSize, vec2 } from 'littlejsengine';
+import { Color, EngineObject, drawRect, drawTextScreen, mainCanvasSize, setCameraScale, vec2 } from 'littlejsengine';
 import type { EntityType, GameModuleState, ManagedEntity } from '../../runtime';
 import type { GameContext, GameFrame, GameModule } from '../contract';
 import { mazeConfig } from './config';
@@ -61,6 +61,8 @@ export class MazeEscapeGame implements GameModule {
 
   render(): void {
     const half = mazeConfig.halfSize;
+    // Fit the full maze between the HUD and controls in embedded previews too.
+    setCameraScale(Math.max(1, Math.min(mainCanvasSize.x - 32, mainCanvasSize.y - 140) / (half * 2)));
     drawRect(vec2(), vec2(half * 2), palette.floor);
     drawRect(vec2(mazeConfig.exitPosition.x, mazeConfig.exitPosition.y), vec2(1), this.hasKey ? palette.exitOpen : palette.exitLocked);
     const center = mainCanvasSize.scale(0.5);

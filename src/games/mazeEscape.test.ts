@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
-import { engineObjects, setEngineManualStep, setHeadlessMode } from 'littlejsengine';
+import { engineObjects, mainCanvasSize, setEngineManualStep, setHeadlessMode, vec2, worldToScreen } from 'littlejsengine';
 import { AuthoredGameHost } from './host';
 import { MazeEscapeGame } from './maze-escape';
 import type { GameFrame } from './contract';
@@ -29,6 +29,21 @@ function entity(id: string): EntityState {
   return result.data;
 }
 function create(args: CreateEntityArgs) { assert.equal(runtime.createEntity(args).ok, true); }
+
+test('rendering keeps the entire maze visible at embedded and full preview sizes', () => {
+  const originalSize = mainCanvasSize.copy();
+  try {
+    for (const [width, height] of [[640, 376], [360, 210], [960, 560]]) {
+      mainCanvasSize.set(width!, height!);
+      game.render();
+      for (const x of [-8, 8]) for (const y of [-8, 8]) {
+        const screen = worldToScreen(vec2(x, y));
+        assert.ok(screen.x >= 0 && screen.x < width!, 'Maze bounds must fit horizontally');
+        assert.ok(screen.y >= 50 && screen.y < height! - 20, 'Maze bounds must fit between HUD and controls');
+      }
+    }
+  } finally { mainCanvasSize.set(originalSize.x, originalSize.y); }
+});
 
 test('deleting the enemy leaves player movement, collecting, and winning operational', () => {
   runtime.deleteEntity('enemy-1');
