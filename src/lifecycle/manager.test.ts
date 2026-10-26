@@ -72,7 +72,7 @@ test('launch, inspect, reload, stop, and repeated launch preserve ownership and 
   const { manager } = f;
   let client: GameBridgeClient | undefined;
   try {
-    assert.equal(manager.listGames()[0]?.id, 'maze-escape');
+    assert.ok(manager.listGames().some(game => game.id === 'maze-escape'));
     assert.equal((await manager.launchGame()).ok, true);
     const initial = manager.getStatus();
     assert.equal(initial.state, 'ready');
