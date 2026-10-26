@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lorecraft-game": {
+      "command": "pnpm",
+      "args": ["mcp"],
+      "cwd": "/Users/rudranshsrivastava/Programming/Lorecraft",
+      "env": {
+        "MCP_BRIDGE_URL": "ws://127.0.0.1:8787",
+        "MCP_BRIDGE_TIMEOUT_MS": "5000"
+      },
+      "timeoutSeconds": 30
+    }
+  }
+}

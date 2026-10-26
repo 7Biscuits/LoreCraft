@@ -6,14 +6,17 @@
   "scripts": {
     "dev": "vite",
     "bridge": "tsx src/bridge/server.ts",
+    "mcp": "tsx src/mcp/server.ts",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts",
+    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
     "littlejsengine": "^1.28.0",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
