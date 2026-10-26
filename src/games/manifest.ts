@@ -1,5 +1,6 @@
 /** Node reads metadata only; LittleJS game modules are loaded by the browser. */
 export const gameCatalog: readonly { id: string; title: string; entry: string; exportName: string }[] = [
+  { id: 'happy-flappy', title: 'Happy Flappy', entry: './happy-flappy/index.ts', exportName: 'happyFlappyGame' },
   { id: 'maze-escape', title: 'Maze Escape', entry: './maze-escape/index.ts', exportName: 'mazeEscapeGame' },
   { id: 'generated-game', title: 'Moonlit Grove', entry: './generated-game/index.ts', exportName: 'generatedGame' },
   { id: 'super-mario', title: 'Super Mario Bros (World 1-1)', entry: './super-mario/index.ts', exportName: 'superMarioGame' },
