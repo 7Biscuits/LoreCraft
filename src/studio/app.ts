@@ -7,6 +7,8 @@ import type { SavedSourceGame } from './storage';
 import type { WorldState } from './engine';
 import { agentActivitySchema } from './agentState';
 import type { AgentActivity } from './agentState';
+import { foundations } from './foundations';
+import { assetLibrary } from './assets';
 import { localDemoStages, matchLocalDemo } from './localDemo';
 
 const paths: Record<string, string> = {
@@ -31,7 +33,7 @@ const paths: Record<string, string> = {
 };
 const icon = (name: string, cls = '') => `<svg class="icon ${cls}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] ?? paths.spark}</svg>`;
 const escape = (value: unknown) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-const genreNames = { adventure: 'Adventure', shooter: 'Arcade shooter', survival: 'Survival', runner: 'Endless runner' };
+const genreNames = { adventure: 'Adventure', shooter: 'Arcade shooter', survival: 'Survival', runner: 'Endless runner', platformer: 'Platformer', puzzle: 'Puzzle' };
 const themeNames = { forest: 'Moonlit forest', space: 'Deep space', dungeon: 'Ancient dungeon', ocean: 'Under the sea', neon: 'Neon city' };
 const uuid = () => crypto.randomUUID();
 const download = (name: string, data: Blob | string, type = 'application/json') => {
@@ -68,6 +70,9 @@ export async function startStudio(): Promise<void> {
   let backgroundActivity: AgentActivity | undefined;
   let backgroundUrl = '';
   let renderedLibrary = '';
+  let galleryQuery = '', galleryGenre = '', galleryTheme = '';
+  let serverProjects: { id: string; title: string; description: string; genre: GameSpec['genre']; theme: GameSpec['theme']; updatedAt: string; revisionId: string }[] = [];
+  let catalogGames: { id: string; title: string }[] = [];
   let ownsAgentRuntime = false, requestingAgentLock = false;
   let releaseAgentLock: (() => void) | undefined;
   let activityTimer: ReturnType<typeof setTimeout> | undefined;
@@ -82,7 +87,7 @@ export async function startStudio(): Promise<void> {
       <a class="brand" href="/" aria-label="LoreCraft home"><span class="brand-symbol">${icon('spark')}</span><span>Lore<span class="brand-light">Craft</span></span><span class="beta">BETA</span></a>
       <button class="new-world" data-action="new">${icon('plus')} New world <span>⌘ K</span></button>
       <div class="nav-label">YOUR STUDIO</div>
-      <nav aria-label="Main navigation"><button class="nav-item active" data-action="workspace">${icon('grid')} Workspace <span class="nav-dot"></span></button><button class="nav-item" data-action="projects">${icon('folder')} My projects <span id="project-count">0</span></button><button class="nav-item" data-action="history">${icon('clock')} Version history</button></nav>
+      <nav aria-label="Main navigation"><button class="nav-item active" data-action="workspace">${icon('grid')} Workspace <span class="nav-dot"></span></button><button class="nav-item" data-action="gallery">${icon('eye')} Game gallery</button><button class="nav-item" data-action="projects">${icon('folder')} My projects <span id="project-count">0</span></button><button class="nav-item" data-action="history">${icon('clock')} Version history</button></nav>
       <div class="sidebar-divider"></div>
       <div class="nav-label">YOUR GAMES</div><div id="game-library" class="inspiration" aria-label="Playable games"></div>
       <div class="sidebar-bottom"><div class="studio-note">${icon('leaf')}<span>Big worlds.<br>A little imagination.</span></div><button class="nav-item" data-action="help">${icon('help')} How it works</button><button class="profile" data-action="settings"><span class="avatar">LC</span><span>Creator workspace<small>Saved on this device</small></span>${icon('settings')}</button></div>
@@ -95,7 +100,7 @@ export async function startStudio(): Promise<void> {
           <h1>A little lore.<br> A whole <em>world.</em></h1>
           <p class="intro">Dream up something worth playing.<br> We’ll help you bring it to life.</p>
           <section id="agent-activity" hidden aria-live="polite" aria-label="Coding agent activity"></section>
-          <form id="prompt-form"><label class="prompt-label" for="prompt">What would you like to create?</label><div class="prompt-box"><textarea id="prompt" maxlength="4000" placeholder="A Mario platformer with coins and enemies, or a rush through a winding maze…" required minlength="3"></textarea><div class="prompt-bottom"><span>${icon('spark')} <select id="generation-mode" aria-label="Generation mode"><option value="local">Local generation</option><option value="ai" disabled>AI · connect a key</option></select></span><span id="prompt-count">0 / 4000</span></div><button class="generate-button" type="submit" id="generate">${icon('spark')} Create my game ${icon('arrow')}</button></div></form>
+          <form id="prompt-form"><label class="prompt-label" for="prompt">What would you like to create?</label><div class="prompt-box"><textarea id="prompt" maxlength="4000" placeholder="A forest platformer, a numbered-gem puzzle, or a space shooter…" required minlength="3"></textarea><div class="prompt-bottom"><span>${icon('spark')} <select id="generation-mode" aria-label="Generation mode"><option value="local">Local generation</option><option value="ai" disabled>AI · connect a key</option></select></span><span id="prompt-count">0 / 4000</span></div><button class="generate-button" type="submit" id="generate">${icon('spark')} Create my game ${icon('arrow')}</button></div></form>
           <div id="generation-progress" hidden aria-live="polite"></div>
           <div class="build-note" id="build-note"></div>
           <div class="author-footer"><span class="mini-orbit">✧</span><span>Make it yours. Change the world, the rules,<br>or just the color of the sky.</span></div>
@@ -134,7 +139,7 @@ export async function startStudio(): Promise<void> {
   };
   const safe = (action: () => Promise<unknown> | void) => { void Promise.resolve().then(action).catch((error: unknown) => toast(error instanceof Error ? error.message : 'Something went wrong.')); };
   const modal = (title: string, body: string) => { const el = $<HTMLDialogElement>('#modal'); el.innerHTML = `<div class="modal-heading"><h2>${escape(title)}</h2><button class="icon-button" data-action="close-modal" aria-label="Close dialog">${icon('close')}</button></div>${body}`; if (!el.open) el.showModal(); };
-  const objective = (spec: GameSpec) => spec.genre === 'runner' || spec.genre === 'survival' ? `Stay alive for ${spec.timeLimit} seconds. Collect gems along the way for a higher score.` : `Collect ${spec.collectibleCount} ${spec.theme === 'ocean' ? 'pearls' : 'crystals'}${spec.genre === 'shooter' ? ', clear the drones,' : ''} and reach the glowing portal.`;
+  const objective = (spec: GameSpec) => spec.genre === 'puzzle' ? foundations.puzzle.objective : spec.genre === 'platformer' ? foundations.platformer.objective : spec.genre === 'runner' || spec.genre === 'survival' ? `Stay alive for ${spec.timeLimit} seconds. Collect gems along the way for a higher score.` : `Collect ${spec.collectibleCount} ${spec.theme === 'ocean' ? 'pearls' : 'crystals'}${spec.genre === 'shooter' ? ', clear the drones,' : ''} and reach the glowing portal.`;
 
   function renderDetails() {
     if (emptyWorkspace) { $('#detail-content').innerHTML = '<p class="source-note">Describe a game above to start creating. Your saved games will appear in Your Games.</p>'; return; }
@@ -147,7 +152,7 @@ export async function startStudio(): Promise<void> {
       return;
     }
     if (tab === 'overview') {
-      $('#detail-content').innerHTML = `<div class="overview-grid"><div class="overview-story"><span class="section-caption">THE LITTLE LORE</span><h3>${escape(spec.title)}</h3><p>${escape(spec.description)}</p><div class="objective">${icon('spark')}<span>${escape(objective(spec))}</span></div></div><div class="world-details"><span class="section-caption">WORLD DETAILS</span><dl><div><dt>World</dt><dd>${themeNames[spec.theme]}</dd></div><div><dt>Genre</dt><dd>${genreNames[spec.genre]}</dd></div><div><dt>Difficulty</dt><dd><span class="difficulty-dots">${'●'.repeat(spec.difficulty === 'hard' ? 3 : spec.difficulty === 'normal' ? 2 : 1)}<span>${'●'.repeat(spec.difficulty === 'hard' ? 0 : spec.difficulty === 'normal' ? 1 : 2)}</span></span> ${spec.difficulty}</dd></div><div><dt>Controls</dt><dd><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> + <kbd>⇧</kbd></dd></div></dl></div></div><div class="refine-hint">${icon('spark')} A different twist? Try “make it a space shooter” or “add more enemies” in the prompt.</div>`;
+      $('#detail-content').innerHTML = `<div class="overview-grid"><div class="overview-story"><span class="section-caption">THE LITTLE LORE</span><h3>${escape(spec.title)}</h3><p>${escape(spec.description)}</p><div class="objective">${icon('spark')}<span>${escape(objective(spec))}</span></div></div><div class="world-details"><span class="section-caption">WORLD DETAILS</span><dl><div><dt>World</dt><dd>${themeNames[spec.theme]}</dd></div><div><dt>Genre</dt><dd>${genreNames[spec.genre]}</dd></div><div><dt>Difficulty</dt><dd><span class="difficulty-dots">${'●'.repeat(spec.difficulty === 'hard' ? 3 : spec.difficulty === 'normal' ? 2 : 1)}<span>${'●'.repeat(spec.difficulty === 'hard' ? 0 : spec.difficulty === 'normal' ? 1 : 2)}</span></span> ${spec.difficulty}</dd></div><div><dt>Controls</dt><dd>${escape(foundations[spec.genre].controls)}</dd></div></dl></div></div><div class="refine-hint">${icon('spark')} A different twist? Try “make it a space shooter” or “add more enemies” in the prompt.</div>`;
     } else if (tab === 'tests') {
       const passed = revision.checks.filter((c) => c.passed).length;
       $('#detail-content').innerHTML = `<div class="panel-heading"><div><h3>Small checks. Better games.</h3><p>${passed}/${revision.checks.length} deterministic scenarios passed. These test game rules, not human play quality.</p></div><button class="button" data-action="run-tests">${icon('play')} Run again</button></div><div class="checks-list">${revision.checks.map((c) => `<div class="check-row ${c.passed ? 'passed' : 'failed'}"><span>${icon(c.passed ? 'check' : 'close')}</span><div><strong>${escape(c.name)}</strong><p>${escape(c.detail)}</p></div><small>${c.passed ? 'PASS' : 'FAIL'}</small></div>`).join('')}</div>`;
@@ -164,6 +169,7 @@ export async function startStudio(): Promise<void> {
     revision = project.revisions.find((r) => r.id === project.activeRevisionId)!;
     $('#breadcrumb-title').textContent = revision.spec.title; $('#game-title').textContent = revision.spec.title; $('#overlay-title').textContent = revision.spec.title;
     $('#overlay-description').textContent = objective(revision.spec);
+    $('#game-overlay small').textContent = foundations[revision.spec.genre].controls;
     $('#genre-badge').textContent = `2D ${genreNames[revision.spec.genre]}`;
     $('#preview-label').textContent = `${revision.spec.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.game`;
     $('#test-count').textContent = String(revision.checks.filter((c) => c.passed).length);
@@ -190,7 +196,8 @@ export async function startStudio(): Promise<void> {
 
   function sound(frequency: number) {
     if (muted) return;
-    try { audio ??= new AudioContext(); void audio.resume(); const tone = audio.createOscillator(), gain = audio.createGain(); tone.type = 'sine'; tone.frequency.setValueAtTime(frequency, audio.currentTime); tone.frequency.exponentialRampToValueAtTime(frequency * 1.5, audio.currentTime + .12); gain.gain.setValueAtTime(.04, audio.currentTime); gain.gain.exponentialRampToValueAtTime(.001, audio.currentTime + .15); tone.connect(gain); gain.connect(audio.destination); tone.start(); tone.stop(audio.currentTime + .16); } catch { /* Audio is optional; gameplay continues. */ }
+    const preset = frequency === assetLibrary.sounds.damage.frequency ? assetLibrary.sounds.damage : assetLibrary.sounds.collect;
+    try { audio ??= new AudioContext(); void audio.resume(); const tone = audio.createOscillator(), gain = audio.createGain(); tone.type = 'sine'; tone.frequency.setValueAtTime(frequency, audio.currentTime); tone.frequency.exponentialRampToValueAtTime(frequency * preset.endRatio, audio.currentTime + preset.duration); gain.gain.setValueAtTime(.04, audio.currentTime); gain.gain.exponentialRampToValueAtTime(.001, audio.currentTime + .15); tone.connect(gain); gain.connect(audio.destination); tone.start(); tone.stop(audio.currentTime + .16); } catch { /* Audio is optional; gameplay continues. */ }
   }
 
   window.addEventListener('message', (event) => {
@@ -211,12 +218,17 @@ export async function startStudio(): Promise<void> {
       $('#game-overlay').hidden = !paused || snapshot?.outcome !== 'playing';
       $('#toggle-play').innerHTML = icon(paused ? 'play' : 'pause'); $('#toggle-play').setAttribute('aria-label', paused ? 'Play game' : 'Pause game');
       $('#runtime-label').textContent = paused ? 'Paused' : snapshot?.outcome === 'playing' ? 'Playing' : snapshot?.outcome === 'won' ? 'World complete' : 'Try again · R to restart';
-      if (snapshot && snapshot.score > lastScore) sound(620); if (snapshot && snapshot.health < lastHealth) sound(160);
+      if (snapshot && snapshot.score > lastScore) sound(assetLibrary.sounds.collect.frequency); if (snapshot && snapshot.health < lastHealth) sound(assetLibrary.sounds.damage.frequency);
       lastScore = snapshot?.score ?? 0; lastHealth = snapshot?.health ?? revision.spec.lives;
     }
   });
 
   async function addRevision(spec: GameSpec, prompt: string, source: 'local' | 'ai', checks = playtest(spec)) {
+    if (project.storage === 'server') {
+      const response = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: project.id, expectedRevision: project.activeRevisionId, prompt, spec }) });
+      const payload = await response.json(); if (!response.ok) throw new Error(payload.error ?? 'Could not save the server revision.');
+      project = parseProject(payload.project); persist(); updateProjectView(); loadPreview(); return;
+    }
     const next: Revision = { id: uuid(), spec, prompt, source, checks, createdAt: new Date().toISOString() };
     project.revisions.push(next); project.revisions = project.revisions.slice(-50); project.activeRevisionId = next.id; project.updatedAt = next.createdAt;
     persist(); updateProjectView(); loadPreview();
@@ -253,22 +265,30 @@ export async function startStudio(): Promise<void> {
         return;
       }
       $('#progress-0').classList.add('done');
-      let result: { spec: GameSpec; source: 'local' | 'ai'; checks: Revision['checks']; notes?: string[] };
+      let result: { spec: GameSpec; source: 'local' | 'ai'; checks: Revision['checks']; notes?: string[]; project?: Project };
       // Static deployments retain a complete local workflow; AI requests require the local server endpoint.
       if (generationMode === 'local') {
         await new Promise((resolve) => setTimeout(resolve, 100));
         const spec = compilePrompt(prompt, baseSpec); $('#progress-1').classList.add('done');
         await new Promise((resolve) => setTimeout(resolve, 100)); result = { spec, source: 'local', checks: playtest(spec) };
+        if (destination.storage === 'server') {
+          const response = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000), body: JSON.stringify({ prompt, spec, projectId: destination.id, expectedRevision: destination.activeRevisionId }) });
+          const payload = await response.json(); if (!response.ok) throw new Error(payload.error ?? 'Could not save the server revision.'); result.project = parseProject(payload.project);
+        }
       } else {
-        const response = await fetch('/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(65000), body: JSON.stringify({ prompt, previous: baseSpec, mode: 'ai' }) });
+        const remote = destination.storage === 'server' ? { id: destination.id } : serverProjects.find((p) => p.id === destination.id);
+        const response = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(65000), body: JSON.stringify({ prompt, ...(remote ? { projectId: remote.id, expectedRevision: destination.activeRevisionId } : { previous: baseSpec, context: destination.context ?? { summary: baseSpec.description, instructions: '', turns: destination.revisions.slice(-8).map((r) => ({ role: 'user', content: r.prompt.slice(0, 1500) })) } }), mode: 'ai' }) });
         const payload = await response.json(); if (!response.ok) throw new Error(payload.error ?? 'AI generation failed.');
-        result = { ...payload, spec: gameSpecSchema.parse(payload.spec) }; $('#progress-1').classList.add('done');
+        result = { ...payload, source: payload.project?.revisions.at(-1)?.source ?? 'ai', spec: gameSpecSchema.parse(payload.spec) };
+        if (payload.project) { const p = parseProject(payload.project); const r = p.revisions.at(-1)!; serverProjects = [{ id: p.id, title: r.spec.title, description: r.spec.description, genre: r.spec.genre, theme: r.spec.theme, updatedAt: p.updatedAt, revisionId: r.id }, ...serverProjects.filter((v) => v.id !== p.id)]; } $('#progress-1').classList.add('done');
       }
       $('#progress-2').classList.add('done');
       if (pageClosed) return;
       if (result.checks.some((c) => !c.passed)) throw new Error(`Playtest failed: ${result.checks.filter((c) => !c.passed).map((c) => c.name).join(', ')}. Your current world is preserved.`);
       const next: Revision = { id: uuid(), spec: result.spec, prompt, source: result.source, checks: result.checks, createdAt: new Date().toISOString() };
-      const saved = result.spec.title !== baseSpec.title || createNewProject ? newProject(next) : { ...destination, revisions: [...destination.revisions, next].slice(-50), activeRevisionId: next.id, updatedAt: next.createdAt };
+      const saved = result.project ?? (result.spec.title !== baseSpec.title || createNewProject ? newProject(next) : { ...destination, revisions: [...destination.revisions, next].slice(-50), activeRevisionId: next.id, updatedAt: next.createdAt });
+      saved.context ??= { summary: result.spec.description, instructions: '', turns: [] };
+      if (!result.project) { saved.context.summary = result.spec.description; saved.context.turns = [...saved.context.turns, { role: 'user' as const, content: prompt.slice(0, 1500) }].slice(-8); }
       saveProject(saved);
       // Keep the playing revision/iframe in place, but never save or refine from
       // an obsolete copy of this project's history after background generation.
@@ -292,6 +312,41 @@ export async function startStudio(): Promise<void> {
     modal('Your little worlds', `<div class="mobile-game-library inspiration">${sourceGames.map((g) => `<div class="library-game"><button data-action="open-source-game" data-id="${escape(g.id)}">${icon('play')}<span>${escape(g.title)}<small>Saved game</small></span></button><button class="library-delete" data-action="delete-source-game" data-id="${escape(g.id)}" aria-label="Delete ${escape(g.title)}">${icon('trash')}</button></div>`).join('')}</div><p class="modal-intro">Projects stay on this browser. Export a project file to back it up or move it to another device.</p><div class="project-grid">${library.map((p) => { const r = p.revisions.find((v) => v.id === p.activeRevisionId)!; return `<div class="project-card"><div class="project-art theme-${r.spec.theme}"><span>${r.spec.theme === 'forest' ? '♣' : r.spec.theme === 'space' ? '✧' : r.spec.theme === 'ocean' ? '≈' : '♜'}</span></div><div><h3>${escape(r.spec.title)}</h3><p>${genreNames[r.spec.genre]} · ${p.revisions.length} revision${p.revisions.length === 1 ? '' : 's'}</p><div class="inline-actions"><button class="button small" data-action="open-project" data-id="${escape(p.id)}">Open world</button><button class="icon-button danger" data-action="delete-project" data-id="${escape(p.id)}" aria-label="Delete ${escape(r.spec.title)}">${icon('trash')}</button></div></div></div>`; }).join('') || '<p>No saved projects yet.</p>'}</div><button class="button" data-action="import">${icon('folder')} Import project JSON</button>`);
   };
 
+  function galleryEntries() {
+    const local = library.map((p) => { const r = p.revisions.find((r) => r.id === p.activeRevisionId)!; return { id: p.id, kind: 'project', title: r.spec.title, description: r.spec.description, genre: r.spec.genre as string, theme: r.spec.theme as string }; });
+    const cloud = serverProjects.filter((p) => !library.some((l) => l.id === p.id)).map((p) => ({ ...p, kind: 'cloud' }));
+    const sources = [...sourceGames, ...catalogGames.filter((g) => !sourceGames.some((s) => s.id === g.id))].map((g) => ({ id: g.id, kind: 'source', title: g.title, description: 'Source-authored game from this repository.', genre: 'source', theme: 'neon' }));
+    const templates = Object.entries(foundations).map(([genre, f]) => ({ id: genre, kind: 'template', title: `${f.label} starter`, description: f.objective, genre, theme: 'forest' }));
+    return [...local, ...cloud, ...sources, ...templates];
+  }
+  function renderGalleryResults() {
+    const entries = galleryEntries().filter((g) => (!galleryQuery || `${g.title} ${g.description}`.toLowerCase().includes(galleryQuery.toLowerCase())) && (!galleryGenre || g.genre === galleryGenre) && (!galleryTheme || g.theme === galleryTheme));
+    $('#gallery-results').innerHTML = entries.map((g) => `<article class="project-card"><div class="project-art theme-${escape(g.theme)}"><span>✦</span></div><div><h3>${escape(g.title)}</h3><p>${escape(g.genre)} · ${g.kind === 'cloud' ? 'Saved on server' : g.kind === 'template' ? 'Reusable foundation' : 'Saved game'}</p><p>${escape(g.description)}</p><button class="button small" data-action="gallery-details" data-kind="${g.kind}" data-id="${escape(g.id)}">Details & play</button></div></article>`).join('') || '<p>No games match these filters.</p>';
+    $('#gallery-count').textContent = `${entries.length} games`;
+  }
+  async function showGallery() {
+    modal('Game gallery', `<p class="modal-intro">Find a saved game or start from reusable mechanics. Your current game keeps running.</p><div class="gallery-filters"><label>Search<input id="gallery-search" placeholder="Search games" value="${escape(galleryQuery)}"></label><label>Genre<select id="gallery-genre" aria-label="Genre"><option value="">All genres</option>${Object.entries(foundations).map(([g, f]) => `<option value="${g}" ${g === galleryGenre ? 'selected' : ''}>${f.label}</option>`).join('')}<option value="source">Source games</option></select></label><label>Theme<select id="gallery-theme" aria-label="Theme"><option value="">All themes</option>${Object.entries(themeNames).map(([t, label]) => `<option value="${t}" ${t === galleryTheme ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div><p id="gallery-count"></p><div class="project-grid" id="gallery-results"></div>`);
+    renderGalleryResults();
+    const [projects, catalog] = await Promise.allSettled([fetch('/api/projects', { signal: AbortSignal.timeout(3000) }).then((r) => r.ok ? r.json() : null), fetch('/api/games', { signal: AbortSignal.timeout(3000) }).then((r) => r.ok ? r.json() : null)]);
+    if (projects.status === 'fulfilled' && Array.isArray(projects.value?.projects)) serverProjects = projects.value.projects;
+    if (catalog.status === 'fulfilled' && Array.isArray(catalog.value?.games)) catalogGames = catalog.value.games;
+    if ($('#gallery-results')) renderGalleryResults();
+  }
+  async function galleryProject(id: string): Promise<Project> {
+    const local = library.find((p) => p.id === id); const remote = serverProjects.find((p) => p.id === id); if (local && (!remote || remote.revisionId === local.activeRevisionId)) return local;
+    const response = await fetch(`/api/projects/${encodeURIComponent(id)}`); if (!response.ok) throw new Error('Saved project could not be loaded.');
+    return parseProject((await response.json()).project);
+  }
+  async function showGalleryDetails(id: string, kind: string) {
+    const entry = galleryEntries().find((e) => e.id === id && e.kind === kind); if (!entry) return;
+    const p = ['project', 'cloud'].includes(kind) ? await galleryProject(id) : undefined;
+    const spec = p?.revisions.find((r) => r.id === p.activeRevisionId)?.spec;
+    const foundation = foundations[(spec?.genre ?? entry.genre) as GameSpec['genre']];
+    modal(entry.title, `<p class="modal-intro">${escape(entry.description)}</p><dl class="gallery-details"><dt>Foundation</dt><dd>${escape(foundation?.label ?? 'Custom source module')}</dd><dt>Mechanics</dt><dd>${escape(foundation?.mechanics.join(', ') ?? 'GameModule lifecycle')}</dd><dt>Controls</dt><dd>${escape(foundation?.controls ?? 'See in-game instructions')}</dd>${p ? `<dt>History</dt><dd>${p.revisions.length} saved revisions</dd><dt>AI context</dt><dd>${escape(p.context?.summary ?? 'Revision prompts are saved with this project.')}</dd>` : ''}</dl><button class="button primary" data-action="gallery-play" data-kind="${kind}" data-id="${escape(id)}">${kind === 'template' ? 'Create starter' : 'Play game'}</button><button class="button quiet" data-action="gallery">Back to gallery</button>`);
+  }
+  document.addEventListener('input', (event) => { if ((event.target as HTMLElement).id === 'gallery-search') { galleryQuery = (event.target as HTMLInputElement).value; renderGalleryResults(); } });
+  document.addEventListener('change', (event) => { const el = event.target as HTMLSelectElement; if (el.id === 'gallery-genre') { galleryGenre = el.value; renderGalleryResults(); } if (el.id === 'gallery-theme') { galleryTheme = el.value; renderGalleryResults(); } });
+
   document.addEventListener('click', (event) => {
     const button = (event.target as Element).closest<HTMLElement>('[data-action]'); if (!button) return;
     const action = button.dataset.action;
@@ -299,7 +354,16 @@ export async function startStudio(): Promise<void> {
       if (agentActivity && ['rename', 'apply-source', 'checkpoint', 'restore-checkpoint'].includes(action ?? '')) throw new Error('This source-authored game is managed by your coding agent. Project JSON editing and checkpoints apply to studio-generated games.');
       if (generating && ['new', 'open-project', 'confirm-delete', 'confirm-delete-source-game', 'restore-revision', 'rename', 'apply-source', 'import'].includes(action ?? '')) throw new Error('Wait for generation to finish before changing projects or revisions.');
       if (emptyWorkspace && ['save', 'rename', 'apply-source', 'run-tests', 'checkpoint', 'restore-checkpoint', 'export', 'mcp'].includes(action ?? '')) throw new Error('Create or open a game first.');
-      if (action === 'open-source-game') { openSourceGame(button.dataset.id!); $<HTMLDialogElement>('#modal').close(); }
+      if (action === 'gallery') await showGallery();
+      else if (action === 'gallery-details') await showGalleryDetails(button.dataset.id!, button.dataset.kind!);
+      else if (action === 'gallery-play') {
+        const id = button.dataset.id!, kind = button.dataset.kind!;
+        if (kind === 'source') { const g = galleryEntries().find((g) => g.id === id && g.kind === kind)!; saveSourceGame({ id, title: g.title, prompt: '', origin: 'local', jobId: `gallery-${id}`, createdAt: new Date().toISOString() }); sourceGames = readSourceGames(); renderLibrary(); openSourceGame(id); }
+        else if (kind === 'template') { const spec = compilePrompt(`A forest ${id} game`); const r: Revision = { id: uuid(), spec, prompt: `A forest ${id} game`, source: 'local', checks: playtest(spec), createdAt: new Date().toISOString() }; project = newProject(r); persist(); updateProjectView(); loadPreview(); }
+        else { project = await galleryProject(id); persist(); updateProjectView(); loadPreview(); }
+        $<HTMLDialogElement>('#modal').close();
+      }
+      else if (action === 'open-source-game') { openSourceGame(button.dataset.id!); $<HTMLDialogElement>('#modal').close(); }
       else if (action === 'delete-source-game') modal('Delete this saved game?', `<p class="modal-intro">Remove it from this browser's library. You can create it again with a new prompt.</p><div class="inline-actions"><button class="button danger" data-action="confirm-delete-source-game" data-id="${escape(button.dataset.id!)}">Delete game</button><button class="button" data-action="close-modal">Keep it</button></div>`);
       else if (action === 'confirm-delete-source-game') {
         const id = button.dataset.id!; deleteSourceGame(id); sourceGames = readSourceGames(); renderLibrary();
@@ -309,7 +373,7 @@ export async function startStudio(): Promise<void> {
       }
       else if (action === 'exit-agent') { loadPreview(); }
       else if (action === 'export-agent-state') { download(`${agentActivity?.gameId ?? 'game'}-state.json`, JSON.stringify(gameState, null, 2)); }
-      else if (action === 'menu') modal('Your studio', `<div class="mobile-nav"><button class="button" data-action="new">New world</button><button class="button" data-action="projects">My projects</button><button class="button" data-action="history">Version history</button><button class="button" data-action="settings">Creation engine</button><button class="button" data-action="help">How it works</button></div>`);
+      else if (action === 'menu') modal('Your studio', `<div class="mobile-nav"><button class="button" data-action="new">New world</button><button class="button" data-action="gallery">Game gallery</button><button class="button" data-action="projects">My projects</button><button class="button" data-action="history">Version history</button><button class="button" data-action="settings">Creation engine</button><button class="button" data-action="help">How it works</button></div>`);
       else if (action === 'close-modal') $<HTMLDialogElement>('#modal').close();
       else if (action === 'workspace') $<HTMLDialogElement>('#modal').close();
       else if (action === 'play') await play();
@@ -334,7 +398,7 @@ export async function startStudio(): Promise<void> {
         modal('Delete this saved world?', `<p class="modal-intro">This removes its local revisions and checkpoint. Export a JSON backup first if you want to keep it.</p><div class="inline-actions"><button class="button danger" data-action="confirm-delete" data-id="${escape(id)}">Delete saved project</button><button class="button" data-action="projects">Keep it</button></div>`);
       } else if (action === 'confirm-delete') { deleteProject(button.dataset.id!); library = readProjects(); renderLibrary(); if (!agentActivity && project.id === button.dataset.id) openRemainingGame(); $<HTMLDialogElement>('#modal').close(); toast('Game removed from your library.'); }
       else if (action === 'history') modal('Every chapter of your world', `<p class="modal-intro">Restore a revision to revisit its exact rules and seed. Gameplay restarts; checkpoints are stored separately.</p><div class="history-list">${[...project.revisions].reverse().map((r, i) => `<div><span class="revision-number">${String(project.revisions.length - i).padStart(2, '0')}</span><div><strong>${escape(r.spec.title)}</strong><p>${escape(r.prompt)}</p><small>${new Date(r.createdAt).toLocaleString()} · ${r.source === 'ai' ? 'AI' : 'Local'}</small></div><button class="button small" data-action="restore-revision" data-id="${escape(r.id)}">${r.id === revision.id ? 'Current' : 'Restore'}</button></div>`).join('')}</div>`);
-      else if (action === 'restore-revision') { if (generating) return; project.activeRevisionId = button.dataset.id!; project.updatedAt = new Date().toISOString(); persist(); updateProjectView(); loadPreview(); $<HTMLDialogElement>('#modal').close(); toast('Revision restored.'); }
+      else if (action === 'restore-revision') { if (generating) return; if (project.storage === 'server') { const selected = project.revisions.find((r) => r.id === button.dataset.id)!; await addRevision(selected.spec, `Restored revision ${selected.id}`, 'local', selected.checks); $<HTMLDialogElement>('#modal').close(); return; } project.activeRevisionId = button.dataset.id!; project.updatedAt = new Date().toISOString(); persist(); updateProjectView(); loadPreview(); $<HTMLDialogElement>('#modal').close(); toast('Revision restored.'); }
       else if (action === 'checkpoint') { await request('pauseGame'); if (!snapshot) throw new Error('Wait for the game to initialize.'); saveCheckpoint({ ...project, activeRevisionId: revision.id }, snapshot); toast('Checkpoint saved, including score, enemies, and objective progress.'); }
       else if (action === 'restore-checkpoint') { await request('pauseGame'); await request('restore', { state: readCheckpoint({ ...project, activeRevisionId: revision.id }) }); renderDetails(); toast('Checkpoint restored.'); }
       else if (action === 'select-entity') { selectedEntity = button.dataset.id!; renderDetails(); }
@@ -352,7 +416,7 @@ export async function startStudio(): Promise<void> {
       else if (action === 'export-html') { download(`${revision.spec.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.html`, exportHtml(revision.spec), 'text/html'); toast('Standalone game downloaded. Double-click the HTML file to play.'); }
       else if (action === 'export-json') { download(`${revision.spec.title}.lorecraft.json`, JSON.stringify(project, null, 2)); toast('Project backup downloaded.'); }
       else if (action === 'import') $<HTMLInputElement>('#import-file').click();
-      else if (action === 'settings') modal('Your creation engine', `<div class="connection-state"><span class="live-dot"></span><strong>${aiAvailable ? 'AI generation is configured' : 'Local generation is ready'}</strong></div><p class="modal-intro">Local generation recognizes Mario and rush prompts for a short presentation flow using prepared games. Mario opens Super Mario; rush, maze, or escape opens Maze Escape. Other prompts use the local generator with four game genres and five world themes. It works without an API key or network.</p><h3>Optional AI generation</h3><p>AI translates richer prompts into the same validated game schema. For OpenAI, set <code>OPENAI_API_KEY</code> and <code>OPENAI_MODEL</code> in a server-side <code>.env</code>. For a custom provider, set <code>LLM_API_KEY</code>, <code>LLM_BASE_URL</code>, <code>LLM_MODEL</code>, and <code>LLM_API_STYLE</code> (<code>responses</code> or <code>chat_completions</code>). Restart the server after configuration. Keys never enter browser storage or exports.</p><pre>LLM_API_KEY=your-provider-key\nLLM_BASE_URL=https://provider.example/v1\nLLM_MODEL=your-model-id\nLLM_API_STYLE=chat_completions\nLLM_JSON_MODE=json_schema</pre><p class="source-note">If your provider does not support strict schemas, try <code>LLM_JSON_MODE=json_object</code> or <code>prompt</code>. Output is always validated locally. A configured key enables AI mode; it does not verify provider connectivity.</p><p class="source-note">The demo supports 2D adventure, shooter, survival, and runner games. Arbitrary 3D games and custom mechanics outside this schema require source authoring.</p>`);
+      else if (action === 'settings') modal('Your creation engine', `<div class="connection-state"><span class="live-dot"></span><strong>${aiAvailable ? 'AI generation is configured' : 'Local generation is ready'}</strong></div><p class="modal-intro">Local generation recognizes Mario and rush prompts for a short presentation flow using prepared games. Mario opens Super Mario; rush, maze, or escape opens Maze Escape. Other prompts use the local generator with four game genres and five world themes. It works without an API key or network.</p><h3>Optional AI generation</h3><p>AI translates richer prompts into the same validated game schema. For OpenAI, set <code>OPENAI_API_KEY</code> and <code>OPENAI_MODEL</code> in a server-side <code>.env</code>. For a custom provider, set <code>LLM_API_KEY</code>, <code>LLM_BASE_URL</code>, <code>LLM_MODEL</code>, and <code>LLM_API_STYLE</code> (<code>responses</code> or <code>chat_completions</code>). Restart the server after configuration. Keys never enter browser storage or exports.</p><pre>LLM_API_KEY=your-provider-key\nLLM_BASE_URL=https://provider.example/v1\nLLM_MODEL=your-model-id\nLLM_API_STYLE=chat_completions\nLLM_JSON_MODE=json_schema</pre><p class="source-note">If your provider does not support strict schemas, try <code>LLM_JSON_MODE=json_object</code> or <code>prompt</code>. Output is always validated locally. A configured key enables AI mode; it does not verify provider connectivity.</p><p class="source-note">The shared engine supports 2D adventure, platformer, runner, shooter, survival, and ordered-gem puzzle games. Arbitrary 3D games and custom mechanics outside this schema require source authoring.</p>`);
       else if (action === 'help') modal('From a little lore to a playable world', `<ol class="help-steps"><li><strong>Start with an idea.</strong><p>Describe the setting, goal, and challenge. Try “create a Mario platformer” or “make a rush game”.</p></li><li><strong>Make it playable.</strong><p>Create the game, then enter the world. WASD / arrows move, Shift dashes, Space boosts fire in shooters, P pauses, and R restarts.</p></li><li><strong>Give it your twist.</strong><p>Try “make it easier”, “add 3 enemies”, “change it to an ocean runner”, or edit validated JSON in Source.</p></li><li><strong>Inspect and test.</strong><p>Pause, edit live entities, save checkpoints, and run deterministic gameplay scenarios. Revisions preserve each design.</p></li><li><strong>Let someone play.</strong><p>Export a standalone HTML file for judges or friends. It runs offline without an account or installation.</p></li></ol><p class="source-note">This is a local-first creator studio. Projects are stored on this device. Export JSON to back up your work. AI generation is optional.</p>`);
     });
   });
@@ -367,7 +431,7 @@ export async function startStudio(): Promise<void> {
   $('#import-file').addEventListener('change', () => safe(async () => {
     if (generating) throw new Error('Wait for generation to finish before importing.');
     const input = $<HTMLInputElement>('#import-file'), file = input.files?.[0]; if (!file) return;
-    try { if (file.size > 2_000_000) throw new Error('Project files must be smaller than 2 MB.'); const imported = parseProject(JSON.parse(await file.text())); imported.id = uuid(); project = imported; persist(); updateProjectView(); loadPreview(); $<HTMLDialogElement>('#modal').close(); toast('Project imported with its revision history.'); } finally { input.value = ''; }
+    try { if (file.size > 2_000_000) throw new Error('Project files must be smaller than 2 MB.'); const imported = parseProject(JSON.parse(await file.text())); imported.id = uuid(); delete imported.storage; project = imported; persist(); updateProjectView(); loadPreview(); $<HTMLDialogElement>('#modal').close(); toast('Project imported with its revision history.'); } finally { input.value = ''; }
   }));
   for (const button of document.querySelectorAll<HTMLElement>('[data-touch]')) {
     const touch = (down: boolean) => { if (ready) frame.contentWindow?.postMessage({ source: 'lorecraft-studio', operation: 'touch', args: { key: button.dataset.touch, down } }, location.origin); };
@@ -384,7 +448,12 @@ export async function startStudio(): Promise<void> {
     const done = activity.stage === 'ready';
     if (done) {
       try {
-        saveSourceGame({ id: activity.gameId, title: activity.title, prompt: activity.prompt, origin: 'agent', jobId: activity.jobId, createdAt: activity.updatedAt });
+        if (activity.runtimeUrl && new URL(activity.runtimeUrl).searchParams.has('aiProject')) {
+          const id = new URL(activity.runtimeUrl).searchParams.get('aiProject')!;
+          void fetch(`/api/projects/${encodeURIComponent(id)}`).then(async (r) => { if (!r.ok) return; const p = parseProject((await r.json()).project); saveProject(p);
+            if (project.id === p.id) { project = p; revision = p.revisions.find((r) => r.id === revision.id) ?? revision; }
+            library = readProjects(); renderLibrary(); }).catch(() => {});
+        } else saveSourceGame({ id: activity.gameId, title: activity.title, prompt: activity.prompt, origin: 'agent', jobId: activity.jobId, createdAt: activity.updatedAt });
         sourceGames = readSourceGames(); renderLibrary();
       } catch { toast('Could not save this game locally. Free browser storage and try again.'); }
     }

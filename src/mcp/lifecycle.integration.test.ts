@@ -36,6 +36,7 @@ test('MCP lifecycle launches real servers, routes through Vite, reloads a fresh 
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/mcp/server.ts'], {
     cwd: root, stdio: ['pipe', 'pipe', 'pipe'], env: {
       ...process.env, BRIDGE_PORT: String(bridgePort), LORECRAFT_VITE_PORT: String(vitePort),
+      LORECRAFT_PROJECT_DB: join(directory, 'projects.sqlite'),
       MCP_BRIDGE_URL: `ws://127.0.0.1:${bridgePort}`, LORECRAFT_BRIDGE_TOKEN_FILE: join(directory, 'token'),
     },
   });
@@ -82,6 +83,7 @@ test('MCP lifecycle launches real servers, routes through Vite, reloads a fresh 
       createEntity: () => ({ ok: false, error: { code: 'OPERATION_FAILED', message: 'unused' } }),
       getGameState: () => ({ mode: 'maze-escape', score: 0 }), resetGame: () => {},
     });
+    Object.assign(runtime, { runGameplayTest: () => ({ ok: true, data: { checks: [{ name: 'Fixture runtime check', passed: true, detail: 'The loaded runtime was inspected through the bridge.' }] } }) });
     browser = new BrowserRuntimeBridge(undefined, {
       url: socketUrl.href, WebSocketConstructor: BrowserSocket as unknown as typeof globalThis.WebSocket,
       identity: { gameId: page.searchParams.get('game')!, sessionId: page.searchParams.get('session')!, runtimeId: crypto.randomUUID() },
@@ -111,6 +113,25 @@ test('MCP lifecycle launches real servers, routes through Vite, reloads a fresh 
     const reloaded = await call('reload_game') as RuntimeLifecycleStatus;
     assert.equal(reloaded.state, 'ready');
     assert.notEqual(reloaded.sessionId, launched.sessionId);
+    // Exercise the unified MCP operation through real stdio and HTTP persistence.
+    const unified = call('create_game', { prompt: 'a peaceful forest puzzle', openBrowser: false });
+    let projectUrl: string | undefined;
+    for (let i = 0; i < 150; i++) {
+      const status = await call('get_runtime_status') as RuntimeLifecycleStatus;
+      if (status.activity?.stage === 'loading' && status.activity.runtimeUrl?.includes('aiProject=')) { projectUrl = status.activity.runtimeUrl; break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(projectUrl, stderr);
+    browser?.disconnect(); connectDocument(projectUrl);
+    const created = await unified as RuntimeLifecycleStatus;
+    assert.equal(created.state, 'ready'); assert.equal(created.creation?.diagnostics.productionBuild, false);
+    assert.equal(created.creation?.foundation, 'ordered-gems');
+    assert.ok((created as RuntimeLifecycleStatus & { runtimeChecks: { passed: boolean }[] }).runtimeChecks.every((c) => c.passed));
+    const savedResponse = await fetch(new URL(`/api/projects/${created.creation!.projectId}`, readyUrl));
+    assert.equal(savedResponse.status, 200);
+    const saved = (await savedResponse.json()).project;
+    assert.equal(saved.context.turns[0].content, 'a peaceful forest puzzle');
+    assert.ok(saved.revisions[0].checks.every((c: { passed: boolean }) => c.passed));
     // Ending the stdio session must release Vite, relay sockets, and owned resources.
     child.stdin.end();
     const exitTimer = setTimeout(() => child.kill('SIGKILL'), 4000);

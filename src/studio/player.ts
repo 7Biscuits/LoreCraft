@@ -1,7 +1,7 @@
 import { AuthoredGameHost } from '../games/host';
 import { GeneratedGame } from './generatedGame';
 import { checkpointSchema, compilePrompt, examples, parseProject } from './spec';
-import { BrowserRuntimeBridge } from '../bridge/browserBridge';
+import { BrowserRuntimeBridge, isRuntimeBridgeAvailable } from '../bridge/browserBridge';
 import { captureConsole, inspectionOperations, recordLog, runtimeLogs } from '../runtime/inspection';
 import { dispatchRuntimeOperation, bridgeOperations } from '../bridge/protocol';
 import type { BridgeOperation } from '../bridge/protocol';
@@ -64,7 +64,7 @@ export async function startPlayer(): Promise<void> {
   });
   if (params.get('bridge') === '1') {
     const url = new URL('/runtime-bridge', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    bridge = new BrowserRuntimeBridge(runtime, { url: url.href, identity: { sessionId: params.get('session') ?? 'manual', runtimeId: crypto.randomUUID(), gameId: 'generated-game' },
+    bridge = new BrowserRuntimeBridge(runtime, { url: url.href, checkAvailability: isRuntimeBridgeAvailable, identity: { sessionId: params.get('session') ?? 'manual', runtimeId: crypto.randomUUID(), gameId: 'generated-game' },
       onStatus: (message) => recordLog('info', message),
       beforeControl: () => host.destroy(), onReplaced: () => { host.pause(); report(); },
       onControl: (control) => { dispose(); location.replace(control.action === 'stop' ? 'about:blank' : control.url!); },

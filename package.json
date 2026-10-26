@@ -10,7 +10,7 @@
     "setup:mcp": "node scripts/configure-mcp.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts src/lifecycle/*.test.ts src/studio/*.test.ts scripts/*.test.mjs",
+    "test": "tsx --test src/runtime/*.test.ts src/bridge/*.test.ts src/mcp/*.test.ts src/games/*.test.ts src/lifecycle/*.test.ts src/studio/*.test.ts src/projects/*.test.ts scripts/*.test.mjs",
     "scaffold": "node --import tsx scripts/scaffold.mjs",
     "preview": "vite preview"
   },
@@ -28,5 +28,8 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.5"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

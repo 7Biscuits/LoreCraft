@@ -1,6 +1,6 @@
 /** Prepared local games used for a short presentation flow. Gameplay stays in the existing hosts. */
 export const localDemos = [
-  { id: 'super-mario', title: 'Super Mario Bros (World 1-1)', keywords: /\b(?:super[\s-]*mario|mario|platformer)\b/i },
+  { id: 'super-mario', title: 'Super Mario Bros (World 1-1)', keywords: /\b(?:super[\s-]*mario|mario)\b/i },
   { id: 'maze-escape', title: 'Maze Escape', keywords: /\b(?:rush|maze|escape|labyrinth)\b/i },
 ] as const;
 

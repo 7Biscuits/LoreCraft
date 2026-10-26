@@ -4,6 +4,7 @@ import type { BridgeMessage, BridgeResponse, RuntimeControl, RuntimeIdentity, Ru
 export interface BrowserBridgeOptions {
   url: string;
   reconnectDelayMs?: number;
+  checkAvailability?: () => Promise<boolean>;
   WebSocketConstructor?: typeof WebSocket;
   onStatus?: (message: string) => void;
   identity?: RuntimeIdentity;
@@ -17,6 +18,7 @@ export class BrowserRuntimeBridge {
   private socket: WebSocket | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+  private attempt = 0;
   private lastStatus = '';
   private readonly WebSocketConstructor: typeof WebSocket;
   private readonly reconnectDelayMs: number;
@@ -33,11 +35,22 @@ export class BrowserRuntimeBridge {
   connect(): void {
     this.stopped = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.open();
+    void this.open();
   }
 
-  private open(): void {
+  private async open(): Promise<void> {
     if (this.stopped || this.socket?.readyState === this.WebSocketConstructor.OPEN || this.socket?.readyState === this.WebSocketConstructor.CONNECTING) return;
+    const attempt = ++this.attempt;
+    if (this.options.checkAvailability) {
+      let available = false;
+      try { available = await this.options.checkAvailability(); } catch { /* Relay is optional. */ }
+      if (this.stopped || attempt !== this.attempt) return;
+      if (!available) {
+        this.reportStatus('MCP relay offline; gameplay remains available.');
+        this.reconnectTimer = setTimeout(() => { void this.open(); }, this.reconnectDelayMs);
+        return;
+      }
+    }
     const socket = new this.WebSocketConstructor(this.options.url);
     this.socket = socket;
     socket.addEventListener('open', () => {
@@ -60,7 +73,7 @@ export class BrowserRuntimeBridge {
       }
       if (!this.stopped) {
         this.reportStatus('Runtime bridge disconnected; reconnecting.');
-        this.reconnectTimer = setTimeout(() => this.open(), this.reconnectDelayMs);
+        this.reconnectTimer = setTimeout(() => { void this.open(); }, this.reconnectDelayMs);
       }
     });
     socket.addEventListener('error', () => this.reportStatus('Runtime bridge socket error.'));
@@ -68,6 +81,7 @@ export class BrowserRuntimeBridge {
 
   disconnect(): void {
     this.stopped = true;
+    ++this.attempt;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.socket?.close();
   }
@@ -124,4 +138,12 @@ function parseJsonMessage(raw: unknown): ReturnType<typeof parseBridgeMessage> |
   } catch {
     return undefined;
   }
+}
+
+/** Ask the same-origin Node endpoint; relay credentials stay out of the browser. */
+export async function isRuntimeBridgeAvailable(): Promise<boolean> {
+  try {
+    const response = await fetch('/api/agent-status', { cache: 'no-store', signal: AbortSignal.timeout(1800) });
+    return response.ok && (await response.json()).connected === true;
+  } catch { return false; }
 }

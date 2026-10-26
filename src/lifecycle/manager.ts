@@ -6,6 +6,9 @@ import type { RuntimeIdentity } from '../bridge/protocol';
 import { defaultGameId } from '../games/manifest';
 import { readGameCatalog } from '../games/readManifest';
 import type { AgentActivity } from '../studio/agentState';
+import { createProjectGame, creationRequestSchema } from '../projects/creation';
+import { projectStore } from '../projects/store';
+import { generatorOptionsFromEnv } from '../studio/generator';
 import { openBrowser, validateSource } from './processes';
 
 export interface RuntimeLifecycleStatus {
@@ -18,6 +21,7 @@ export interface RuntimeLifecycleStatus {
   diagnostics: string[];
   ownsServers: boolean;
   activity?: AgentActivity;
+  creation?: { projectId: string; revisionId: string; foundation: string; checks: Awaited<ReturnType<typeof createProjectGame>>['checks']; diagnostics: Awaited<ReturnType<typeof createProjectGame>>['diagnostics'] };
 }
 
 export type LifecycleResult =
@@ -58,6 +62,8 @@ export class RuntimeLifecycleManager {
   private activity?: AgentActivity;
   private runtimePublished = false;
   private studioOpened = false;
+  private configurationProject?: { id: string; revisionId: string };
+  private creation?: RuntimeLifecycleStatus['creation'];
 
   constructor(private readonly options: LifecycleOptions = {}) {
     this.root = options.root ?? fileURLToPath(new URL('../../', import.meta.url));
@@ -75,10 +81,41 @@ export class RuntimeLifecycleManager {
     return this.activity ? { ...this.activity, events: [...this.activity.events], studioUrl: this.url, runtimeUrl: this.runtimePublished && this.devServer ? this.gameUrl() : undefined } : undefined;
   }
 
+  createGame(body: unknown, open = true): Promise<LifecycleResult> {
+    return this.run(async (signal) => {
+      try {
+        const request = creationRequestSchema.parse(body);
+        const jobId = randomUUID();
+        this.runtimePublished = false; this.configurationProject = undefined; this.creation = undefined;
+        if (this.bridge) await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' });
+        this.selectedGameId = `project-${request.projectId ?? jobId}`; this.sessionId = randomUUID();
+        this.activity = { jobId, gameId: this.selectedGameId, title: 'Preparing your game', prompt: request.prompt, stage: 'planning', message: '', events: [], updatedAt: new Date().toISOString() };
+        this.state = 'starting'; this.progress('planning', 'Selecting reusable mechanics and restoring project context.');
+        await this.ensureServers(signal); await this.showStudio(open);
+        this.progress('authoring', 'Generating validated game data using the existing engine.');
+        const { loadEnv } = await import('vite');
+        const result = await createProjectGame(request, projectStore(this.root), { ...generatorOptionsFromEnv({ ...loadEnv('development', this.root, ''), ...process.env }), signal });
+        signal.throwIfAborted();
+        this.sessionId = randomUUID();
+        this.configurationProject = { id: result.project.id, revisionId: result.project.activeRevisionId };
+        this.selectedGameId = `project-${result.project.id}`;
+        this.activity = { ...this.activity!, gameId: this.selectedGameId, title: result.spec.title };
+        this.creation = { projectId: result.project.id, revisionId: result.project.activeRevisionId, foundation: result.foundation.id, checks: result.checks, diagnostics: result.diagnostics };
+        this.progress('testing', `${result.checks.length} gameplay checks passed. Reusing the ${result.foundation.label} foundation.`);
+        this.url = this.studioUrl(); this.runtimePublished = true; this.state = 'waiting';
+        this.progress('loading', 'Loading the saved specification. No production build is needed.');
+        await this.waitUntilReady(signal, open);
+        this.state = 'ready'; this.progress('ready', 'Your game is ready in the gallery.');
+        return this.success();
+      } catch (error) { return this.failedAction(error, signal, 'LAUNCH_FAILED'); }
+    });
+  }
+
   beginCreation(gameId: string, title: string, prompt: string, open = true): Promise<LifecycleResult> {
     return this.run(async (signal) => {
       if (!/^[a-z0-9-]{1,128}$/.test(gameId)) return this.fail('INVALID_GAME', 'Use a valid lowercase game ID.');
       if (this.bridge) await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' });
+      this.configurationProject = undefined; this.creation = undefined;
       this.selectedGameId = gameId; this.runtimePublished = false; this.sessionId = randomUUID();
       this.activity = { jobId: randomUUID(), gameId, title: title.slice(0, 120), prompt: prompt.slice(0, 4000), stage: 'planning', message: '', events: [], updatedAt: new Date().toISOString() };
       this.progress('planning', 'Creation requested through MCP. Preparing the workspace.');
@@ -109,7 +146,7 @@ export class RuntimeLifecycleManager {
       runtimeId: matching ? presence.runtimeId : undefined,
       url: this.url, message: matching && presence.message ? presence.message : this.message,
       diagnostics: [...this.diagnostics], ownsServers: Boolean(this.bridge || this.devServer),
-      activity: this.getActivity(),
+      activity: this.getActivity(), creation: this.creation,
     };
   }
 
@@ -127,6 +164,7 @@ export class RuntimeLifecycleManager {
     return this.run(async (signal) => {
       if (this.bridge && this.devServer && gameId === this.selectedGameId && this.getStatus().state === 'ready') return this.success();
       if (this.bridge) await this.bridge.controlRuntimeAcknowledged({ kind: 'control', action: 'stop' });
+      this.configurationProject = undefined; this.creation = undefined;
       this.selectedGameId = gameId;
       this.runtimePublished = false;
       this.sessionId = randomUUID();
@@ -139,7 +177,7 @@ export class RuntimeLifecycleManager {
         await this.ensureServers(signal);
         await this.showStudio(open);
         this.progress('validating', 'Type-checking and building the game source.');
-        await (this.options.validateSource ?? validateSource)(this.root, signal);
+        if (!this.configurationProject) await (this.options.validateSource ?? validateSource)(this.root, signal);
         signal.throwIfAborted();
         this.runtimePublished = true;
         this.state = 'waiting'; this.message = 'Waiting for browser game initialization.';
@@ -159,7 +197,7 @@ export class RuntimeLifecycleManager {
       if (!this.bridge || !this.devServer) return this.fail('NOT_RUNNING', 'Launch a managed game before reloading.');
       try {
         this.progress('validating', 'Validating edited source. The previous game remains available.');
-        await (this.options.validateSource ?? validateSource)(this.root, signal);
+        if (!this.configurationProject) await (this.options.validateSource ?? validateSource)(this.root, signal);
         signal.throwIfAborted();
         const previousSession = this.sessionId;
         this.sessionId = randomUUID();
@@ -224,6 +262,7 @@ export class RuntimeLifecycleManager {
     url.searchParams.set('game', this.selectedGameId);
     url.searchParams.set('session', this.sessionId!);
     url.searchParams.set('embedded', '1');
+    if (this.configurationProject) { url.searchParams.set('aiProject', this.configurationProject.id); url.searchParams.set('aiRevision', this.configurationProject.revisionId); }
     return url.href;
   }
 

@@ -107,3 +107,48 @@ test('unexpected disconnection reconnects when the bridge restarts', { timeout: 
     assert.equal((await client.request('getGameState', {})).ok, true);
   } finally { browser.disconnect(); await client.close(); await server.close(); }
 });
+
+test('optional relay waits without opening sockets and connects when it becomes available', { timeout: 3000 }, async () => {
+  let available = false, attempts = 0, checks = 0;
+  const statuses: string[] = [];
+  const server = new RuntimeBridgeServer({ port: 0, token: 'test-token', log: () => {} });
+  await server.ready;
+  class CountingSocket extends AuthenticatedSocket {
+    constructor(url: string) { attempts++; super(url); }
+  }
+  let connected!: () => void;
+  const connection = new Promise<void>((resolve) => { connected = resolve; });
+  const browser = new BrowserRuntimeBridge(runtime(), {
+    url: `ws://127.0.0.1:${server.port}`, reconnectDelayMs: 5,
+    WebSocketConstructor: CountingSocket as unknown as typeof globalThis.WebSocket,
+    checkAvailability: async () => { checks++; return available; },
+    onStatus: (status) => { statuses.push(status); if (status === 'Runtime bridge connected.') connected(); },
+  });
+  try {
+    browser.connect();
+    while (checks < 3) await delay(5);
+    assert.equal(attempts, 0, 'An offline relay must not trigger WebSocket proxy attempts.');
+    assert.deepEqual(statuses, ['MCP relay offline; gameplay remains available.']);
+    available = true;
+    await connection;
+    assert.equal(attempts, 1);
+    available = false;
+    await server.close();
+    await delay(30);
+    assert.equal(attempts, 1, 'A stopped relay must return to availability checks.');
+  } finally { browser.disconnect(); await server.close(); }
+});
+
+test('disconnect cancels a pending relay availability check', async () => {
+  let finish!: (available: boolean) => void;
+  let attempts = 0;
+  class UnexpectedSocket { static OPEN = 1; static CONNECTING = 0; constructor() { attempts++; } }
+  const browser = new BrowserRuntimeBridge(runtime(), {
+    url: 'ws://127.0.0.1:8787/runtime-bridge',
+    WebSocketConstructor: UnexpectedSocket as unknown as typeof globalThis.WebSocket,
+    checkAvailability: () => new Promise((resolve) => { finish = resolve; }),
+  });
+  browser.connect(); browser.disconnect(); finish(true);
+  await delay(10);
+  assert.equal(attempts, 0);
+});

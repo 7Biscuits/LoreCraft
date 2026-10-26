@@ -24,7 +24,7 @@ async function studioFixture(t: TestContext, options: { empty?: boolean } = {}) 
       setAttribute(name: string) { attributes.add(name); },
       removeAttribute(name: string) { attributes.delete(name); },
       addEventListener(name: string, listener: Listener) { this.listeners.set(name, listener); },
-      focus() {}, close() {},
+      focus() {}, close() {}, showModal() {},
       contentWindow: { postMessage(_message?: unknown, _origin?: string) {}, focus() {} },
     };
   }
@@ -201,4 +201,23 @@ test('deleting the last studio-generated game stays empty after refresh', async 
   assert.equal(readProjects().length, 1);
   assert.equal(readProjects()[0]!.revisions.length, 1);
   assert.equal(new URL(studio.element('#game-frame').src).searchParams.get('project'), readProjects()[0]!.id);
+});
+
+test('gallery exposes reusable foundations and opens a platformer without replacing saved games', async (t) => {
+  const studio = await studioFixture(t);
+  const before = readProjects()[0]!;
+  const playingUrl = studio.element('#game-frame').src;
+  await studio.click('gallery');
+  assert.match(studio.element('#modal').innerHTML, /gallery-search/);
+  assert.match(studio.element('#modal').innerHTML, /gallery-genre/);
+  assert.match(studio.element('#gallery-results').innerHTML, /Platformer starter/);
+  assert.match(studio.element('#gallery-results').innerHTML, /Puzzle starter/);
+  assert.equal(studio.element('#game-frame').src, playingUrl);
+  await studio.click('gallery-details', { id: 'platformer', kind: 'template' });
+  assert.match(studio.element('#modal').innerHTML, /gravity, jump, platform-collision/);
+  await studio.click('gallery-play', { id: 'platformer', kind: 'template' });
+  assert.equal(readProjects().length, 2);
+  assert.ok(readProjects().some((p) => p.id === before.id));
+  assert.equal(readProjects()[0]!.revisions[0]!.spec.genre, 'platformer');
+  assert.notEqual(studio.element('#game-frame').src, playingUrl);
 });

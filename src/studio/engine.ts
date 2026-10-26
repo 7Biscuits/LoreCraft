@@ -1,3 +1,5 @@
+import { assetLibrary } from './assets.ts';
+import type { AssetLibrary } from './assets.ts';
 import type { GameSpec } from './spec.ts';
 
 export interface WorldEntity { id: string; type: 'player' | 'coin' | 'enemy' | 'obstacle' | 'bullet'; x: number; y: number; w: number; h: number; speed: number; hp: number; vx: number; vy: number }
@@ -5,14 +7,8 @@ export interface WorldState { entities: WorldEntity[]; elapsed: number; score: n
 export interface GameInput { x: number; y: number; action?: boolean; dash?: boolean }
 
 /** All runtime dependencies live inside this function so exports run offline, without a server. */
-export function createGameEngine(spec: GameSpec) {
-  const colors = {
-    forest: { bg: '#102a26', floor: '#1e4034', grid: '#294a3a', wall: '#315947', accent: '#a9efd0', gem: '#b89fff', enemy: '#f5a391', sky: '#162e2c' },
-    space: { bg: '#0e152d', floor: '#16213d', grid: '#23304d', wall: '#394563', accent: '#86dcff', gem: '#dfb4ff', enemy: '#ff8f9d', sky: '#0a1020' },
-    dungeon: { bg: '#1c1728', floor: '#302a3a', grid: '#3b3446', wall: '#595064', accent: '#d6b5ff', gem: '#f3cc78', enemy: '#ff9e90', sky: '#15121f' },
-    ocean: { bg: '#102c3a', floor: '#174555', grid: '#245160', wall: '#36767a', accent: '#9aeee2', gem: '#ffe7b0', enemy: '#f5a8c6', sky: '#102733' },
-    neon: { bg: '#17152d', floor: '#27213c', grid: '#382c50', wall: '#514164', accent: '#e4b3ff', gem: '#8ff4dc', enemy: '#ff8cb1', sky: '#111020' },
-  }[spec.theme];
+export function createGameEngine(spec: GameSpec, assets: AssetLibrary = assetLibrary) {
+  const colors = assets.palettes[spec.theme];
   let state: WorldState;
   const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
   const random = () => { state.seed = (Math.imul(state.seed, 1664525) + 1013904223) >>> 0; return state.seed / 4294967296; };
@@ -23,7 +19,11 @@ export function createGameEngine(spec: GameSpec) {
   function reset() {
     state = { entities: [], elapsed: 0, score: 0, collected: 0, kills: 0, health: spec.lives, outcome: 'playing', invulnerable: 0, dashCooldown: 0, shotCooldown: 0, seed: spec.seed, tick: 0, effects: [] };
     state.entities.push(entity('player-1', 'player', 2, 7, .62, .7, spec.playerSpeed));
-    if (spec.genre !== 'runner') {
+    if (spec.genre === 'platformer') {
+      state.entities[0]!.y = 11.55;
+      state.entities.push(entity('floor', 'obstacle', 12, 12.4, 24, 1));
+      for (const [i, p] of (spec.level?.platforms ?? [{ x: 7, y: 9.8, w: 3, h: .4 }, { x: 13, y: 8.4, w: 3, h: .4 }, { x: 18, y: 9.8, w: 3, h: .4 }]).entries()) state.entities.push(entity(`platform-${i}`, 'obstacle', p.x, p.y, p.w, p.h));
+    } else if (spec.genre !== 'runner') {
       // Short islands leave a navigable perimeter and connected corridors in every generated map.
       for (let n = 0; n < 10; n++) {
         const x = 5 + (n % 5) * 3.2, y = n < 5 ? 3.4 : 10.6;
@@ -31,12 +31,12 @@ export function createGameEngine(spec: GameSpec) {
       }
     }
     for (let n = 0; n < spec.collectibleCount; n++) {
-      const x = spec.genre === 'runner' ? 5 + n * 2.5 : 4 + (n % 6) * 3;
-      const y = spec.genre === 'runner' ? 3 + (n % 3) * 4 : n < 6 ? 6 + Math.sin(n * 2) * 1.4 : n < 12 ? 1.4 : 12.6;
+      const x = spec.genre === 'platformer' ? 4 + n * 1.05 : spec.genre === 'runner' ? 5 + n * 2.5 : 4 + (n % 6) * 3;
+      const y = spec.genre === 'platformer' ? 11.4 : spec.genre === 'runner' ? 3 + (n % 3) * 4 : n < 6 ? 6 + Math.sin(n * 2) * 1.4 : n < 12 ? 1.4 : 12.6;
       state.entities.push(entity(`gem-${n + 1}`, 'coin', x, y, .4));
     }
     for (let n = 0; n < spec.enemyCount; n++) {
-      state.entities.push(entity(`enemy-${n + 1}`, 'enemy', 13 + random() * 9, 2 + random() * 10, .65, .65, spec.enemySpeed));
+      state.entities.push(entity(`enemy-${n + 1}`, 'enemy', 13 + random() * 9, spec.genre === 'platformer' ? 11.4 : 2 + random() * 10, .65, .65, spec.enemySpeed));
     }
     return state;
   }
@@ -69,7 +69,21 @@ export function createGameEngine(spec: GameSpec) {
     const length = Math.max(1, Math.hypot(input.x, input.y));
     let speed = player.speed;
     if (input.dash && state.dashCooldown <= 0) { speed *= 5; state.dashCooldown = 1.3; state.invulnerable = .3; burst(player, colors.accent); }
-    move(player, clamp(input.x, -1, 1) / length * speed * dt, clamp(input.y, -1, 1) / length * speed * dt);
+    if (spec.genre === 'platformer') {
+      const grounded = state.entities.some((e) => e.type === 'obstacle' && Math.abs(player.x - e.x) < (player.w + e.w) / 2 && Math.abs(player.y + player.h / 2 - (e.y - e.h / 2)) < .05);
+      const jump = input.y < -.5 || !!input.action;
+      if (jump && grounded && player.hp === 1) player.vy = -11;
+      player.hp = jump ? 0 : 1;
+      player.vy = Math.min(18, player.vy + 28 * dt);
+      const oldY = player.y, dy = player.vy * dt;
+      move(player, clamp(input.x, -1, 1) * speed * dt, dy);
+      if (Math.abs(player.y - oldY - dy) > .001) player.vy = 0;
+    } else if (spec.genre === 'puzzle') {
+      if (state.shotCooldown <= 0 && (input.x || input.y)) {
+        move(player, Math.abs(input.x) >= Math.abs(input.y) ? Math.sign(input.x) * .5 : 0, Math.abs(input.y) > Math.abs(input.x) ? Math.sign(input.y) * .5 : 0);
+        state.shotCooldown = .14;
+      }
+    } else move(player, clamp(input.x, -1, 1) / length * speed * dt, clamp(input.y, -1, 1) / length * speed * dt);
     const enemies = state.entities.filter((e) => e.type === 'enemy');
     if (spec.genre === 'shooter' && state.shotCooldown <= 0 && enemies.length) {
       const target = enemies.reduce((a, b) => Math.hypot(a.x - player.x, a.y - player.y) < Math.hypot(b.x - player.x, b.y - player.y) ? a : b);
@@ -86,7 +100,7 @@ export function createGameEngine(spec: GameSpec) {
       }
       if (e.type === 'coin') {
         if (spec.genre === 'runner') { e.x -= 2.5 * dt; if (e.x < 0) { e.x = 25 + random() * 8; e.y = 2 + random() * 10; } }
-        if (overlap(player, e)) { state.collected++; state.score += 100; burst(e, colors.gem); remove(e); }
+        if (overlap(player, e) && (spec.genre !== 'puzzle' || e.id === `gem-${state.collected + 1}`)) { state.collected++; state.score += 100; burst(e, colors.gem); remove(e); }
       }
       if (e.type === 'bullet') {
         e.x += e.vx * dt; e.y += e.vy * dt;
@@ -97,7 +111,7 @@ export function createGameEngine(spec: GameSpec) {
     }
     if (state.outcome === 'playing') {
       if (spec.genre === 'survival' || spec.genre === 'runner') { if (state.elapsed >= spec.timeLimit) state.outcome = 'won'; }
-      else if (state.collected >= spec.collectibleCount && (spec.genre !== 'shooter' || !state.entities.some((e) => e.type === 'enemy')) && Math.hypot(player.x - 22, player.y - 7) < 1.1) state.outcome = 'won';
+      else if (state.collected >= spec.collectibleCount && (spec.genre !== 'shooter' || !state.entities.some((e) => e.type === 'enemy')) && Math.hypot(player.x - 22, player.y - (spec.genre === 'platformer' ? 11.4 : 7)) < 1.1) state.outcome = 'won';
       else if (state.elapsed >= spec.timeLimit) state.outcome = 'lost';
     }
     if (state.outcome === 'won') state.score += Math.round(state.health * 100);
@@ -109,14 +123,14 @@ export function createGameEngine(spec: GameSpec) {
     ctx.save(); ctx.translate(ox, oy); ctx.scale(scale, scale);
     ctx.fillStyle = colors.floor; ctx.fillRect(0, 0, 960, 560);
     const rect = (x: number, y: number, w: number, h: number, color: string) => { ctx.fillStyle = color; ctx.fillRect(Math.round(x), Math.round(y), w, h); };
-    for (let y = 0; y < 14; y++) for (let x = 0; x < 24; x++) {
+    for (let y = 0; y < assets.tiles.height; y++) for (let x = 0; x < assets.tiles.width; x++) {
       const n = ((x * 71 + y * 37 + spec.seed) % 19) / 19;
       if (n > .55) rect(x * 40 + 9, y * 40 + 14, 3, 3, colors.grid);
       if (n < .15) { rect(x * 40, y * 40 + 39, 40, 1, colors.grid); rect(x * 40 + 39, y * 40, 1, 40, colors.grid); }
     }
     const t = state.elapsed;
     // Decorative edge vegetation / stars: deterministic and independent of simulation state.
-    for (let i = 0; i < 55; i++) {
+    for (let i = 0; i < assets.backgrounds.decorationCount; i++) {
       const x = (i * 173 + spec.seed % 300) % 960, y = i % 2 ? 8 + i % 15 : 528 + i % 15;
       if (spec.theme === 'forest') {
         rect(x - 3, y + 7, 6, 12, '#715e48'); rect(x - 14, y - 10, 28, 20, '#1b352c'); rect(x - 10, y - 17, 20, 24, '#38674c'); rect(x - 7, y - 15, 9, 6, '#4b7c56');
@@ -126,8 +140,8 @@ export function createGameEngine(spec: GameSpec) {
     }
     // Portal pulses only after the objective is complete.
     const unlocked = state.collected >= spec.collectibleCount && (spec.genre !== 'shooter' || !state.entities.some((e) => e.type === 'enemy'));
-    if (spec.genre === 'adventure' || spec.genre === 'shooter') {
-      const px = 880, py = 280;
+    if (!['runner', 'survival'].includes(spec.genre)) {
+      const px = 880, py = spec.genre === 'platformer' ? 456 : 280;
       ctx.save(); ctx.translate(px, py); ctx.globalAlpha = unlocked ? .8 : .25;
       ctx.shadowColor = colors.accent; ctx.shadowBlur = unlocked ? 24 : 0;
       ctx.strokeStyle = colors.accent; ctx.lineWidth = 4; ctx.beginPath(); ctx.ellipse(0, 0, 15 + Math.sin(t * 3) * 2, 24, 0, 0, Math.PI * 2); ctx.stroke();
@@ -136,9 +150,9 @@ export function createGameEngine(spec: GameSpec) {
     }
     const objects = [...state.entities].sort((a, b) => a.y - b.y);
     for (const e of objects) {
-      const x = e.x * 40, y = e.y * 40;
+      const x = e.x * assets.tiles.worldUnit, y = e.y * assets.tiles.worldUnit;
       if (e.type === 'obstacle') {
-        if (spec.theme === 'forest') {
+        if (spec.theme === 'forest' && spec.genre !== 'platformer') {
           rect(x - 5, y + 8, 10, 24, '#795f46'); rect(x - 31, y - 15, 62, 35, '#17362c'); rect(x - 26, y - 32, 52, 39, '#305e42'); rect(x - 18, y - 39, 36, 32, '#457650'); rect(x - 13, y - 35, 14, 8, '#608d60');
         } else {
           rect(x - e.w * 20, y - e.h * 20 + 7, e.w * 40, e.h * 40, colors.bg); rect(x - e.w * 20, y - e.h * 20, e.w * 40, e.h * 40 - 4, colors.wall); rect(x - e.w * 20 + 4, y - e.h * 20 + 4, e.w * 40 - 8, 4, colors.grid);
@@ -146,17 +160,18 @@ export function createGameEngine(spec: GameSpec) {
         continue;
       }
       if (e.type === 'coin') {
-        const bob = Math.sin(t * 3 + e.x) * 3;
+        const bob = Math.sin(t * assets.animations.gem.rate + e.x) * assets.animations.gem.amplitude;
         ctx.save(); ctx.translate(x, y + bob); ctx.shadowColor = colors.gem; ctx.shadowBlur = 16;
-        ctx.fillStyle = colors.gem; ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(7, -2); ctx.lineTo(0, 10); ctx.lineTo(-7, -2); ctx.closePath(); ctx.fill();
-        rect(-2, -6, 3, 7, '#fff5e9'); ctx.restore(); continue;
+        for (const [row, pixels] of assets.sprites.gem.entries()) for (const [column, pixel] of [...pixels].entries()) { if (pixel !== '.') rect((column - 2) * 3, (row - 2) * 3, 3, 3, pixel === '2' ? '#fff5e9' : colors.gem); } ctx.restore();
+        if (spec.genre === 'puzzle') { ctx.fillStyle = colors.accent; ctx.font = '13px monospace'; ctx.textAlign = 'center'; ctx.fillText(e.id.replace('gem-', ''), x, y - 16); }
+        continue;
       }
       if (e.type === 'bullet') { ctx.save(); ctx.shadowColor = colors.accent; ctx.shadowBlur = 14; rect(x - 3, y - 3, 6, 6, colors.accent); ctx.restore(); continue; }
       // Hand-drawn pixel characters: explorer, pilot, diver, and themed enemies.
       ctx.fillStyle = '#00000035'; ctx.beginPath(); ctx.ellipse(x, y + 14, 13, 5, 0, 0, Math.PI * 2); ctx.fill();
       if (e.type === 'player') {
         if (state.invulnerable > 0 && Math.floor(t * 14) % 2) continue;
-        const stride = Math.sin(t * 10) * 2;
+        const stride = Math.sin(t * assets.animations.walk.rate) * assets.animations.walk.amplitude;
         rect(x - 8, y + 6, 6, 9 + stride, '#283b42'); rect(x + 2, y + 6, 6, 9 - stride, '#283b42');
         rect(x - 10, y - 4, 20, 14, spec.theme === 'space' ? '#91becd' : spec.theme === 'ocean' ? '#e8c771' : '#b7b0d6');
         rect(x - 13, y - 1, 4, 9, '#e5be95'); rect(x + 9, y - 1, 4, 9, '#e5be95');

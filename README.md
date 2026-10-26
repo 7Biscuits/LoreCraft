@@ -21,7 +21,7 @@ See [DEMO.md](DEMO.md) for a short judge presentation and verification checklist
 
 ## Creation modes and supported games
 
-Local generation includes a short presentation flow for prepared source games: prompts containing **Mario**, **Super Mario**, or **platformer** open Super Mario; **rush**, **maze**, **escape**, or **labyrinth** open Maze Escape. Mario takes precedence when both sets appear. A roughly six-second staged animation prepares the game, saves it to **Your Games**, and opens it for play. These prompts use the existing games; they do not author new source code. Other prompts use the deterministic prompt compiler with four complete 2D rule sets:
+Local generation includes a short presentation flow for prepared source games: prompts containing **Mario** or **Super Mario** open Super Mario; **rush**, **maze**, **escape**, or **labyrinth** open Maze Escape. Mario takes precedence when both sets appear. A roughly six-second staged animation prepares the game, saves it to **Your Games**, and opens it for play. These prompts use the existing games; they do not author new source code. Other prompts use the deterministic prompt compiler with six reusable 2D rule sets:
 
 | Genre | Goal |
 | --- | --- |
@@ -29,6 +29,8 @@ Local generation includes a short presentation flow for prepared source games: p
 | Shooter | Clear the enemies with auto-aim, collect crystals, then reach the portal. |
 | Survival | Stay alive until the timer ends. |
 | Runner | Dodge scrolling enemies and survive the race timer. |
+| Platformer | Jump, collect gems, and reach the ground exit. |
+| Puzzle | Collect numbered gems in order, then reach the portal. |
 
 Five procedural visual themes are included: forest, space, dungeon, ocean, and neon. Prompts can set enemy/collectible counts, difficulty, lives, and time limits. Refinements such as “make it faster”, “no enemies”, “5 lives”, or “change it to a space shooter” preserve unspecified settings and the seed.
 
@@ -163,6 +165,55 @@ pnpm build
 pnpm preview
 ```
 
-Repository tests cover authenticated transport, malformed responses, request deadlines, replacement, heartbeat cleanup, acknowledged controls, host disposal, gameplay mutation, MCP stdio/lifecycle, scaffolding, import/schema validation, prompt refinement, all 20 genre/theme combinations, AI response repair, credential denial over HTTP, and standalone export execution. Browser QA separately covers the user-facing creation and play flow.
+Repository tests cover authenticated transport, malformed responses, request deadlines, replacement, heartbeat cleanup, acknowledged controls, host disposal, gameplay mutation, MCP stdio/lifecycle, scaffolding, import/schema validation, prompt refinement, all 30 genre/theme combinations, AI response repair, credential denial over HTTP, and standalone export execution. Browser QA separately covers the user-facing creation and play flow.
 
 `pnpm build` produces `dist/`. `pnpm preview` serves the built app on port 4173 with the optional generation API and authenticated bridge proxy. The exported game HTML runs entirely offline; the full studio can also be served statically in local-generation mode.
+
+## Reusable game creation and persistent AI projects
+
+Use Node **22.13 or later**. Existing browser-local projects, checkpoints, custom source games, and exports remain supported. The shared specification engine now includes adventure, platformer, runner, shooter, survival, and puzzle foundations. Platformers add gravity, jumping, solid platforms, and a ground exit; puzzles use grid movement and numbered gems that must be collected in order. Generic platformer prompts use this engine; explicit Mario prompts still select the existing Mario demo.
+
+Open **Game gallery** to search saved projects, registered source games, and reusable starters. Filter by genre and theme, inspect mechanics/controls/history, then play. Server projects are loaded into the existing preview when selected. Background agent creation never replaces the selected playable iframe.
+
+### Unified MCP operation
+
+Reconnect LoreCraft in your coding agent to discover `create_game`. Example arguments:
+
+```json
+{"prompt":"A peaceful forest puzzle with six numbered crystals","mode":"local"}
+```
+
+The tool selects a foundation, validates the specification, runs deterministic gameplay checks, saves the project, reuses owned Vite/relay servers, waits for browser readiness, runs the loaded runtime’s gameplay-check operation, and returns `creation.projectId`, `revisionId`, foundation, individual checks, `runtimeChecks`, and diagnostics. Local mode assembles game data without a paid provider; `mode: "ai"` uses the existing server-side provider configuration. For `openBrowser: false`, open the URL from `get_runtime_status` while the call waits for runtime readiness.
+
+Refine the same project without regenerating code:
+
+```json
+{"prompt":"Give the explorer six lives","projectId":"PROJECT_UUID","expectedRevision":"REVISION_UUID","patch":{"lives":6}}
+```
+
+Omit `patch` to apply a natural-language edit. Send `spec` for a complete validated specification, or `patch` for bounded field updates; these are mutually exclusive. Unspecified patch fields, seed, revision history, and saved AI instructions remain intact. Pass `instructions` to set persistent project preferences. Configuration-only creation/edit/reload does **not** invoke `pnpm build`. Custom TypeScript authoring continues to use `begin_game_creation`, `update_game_creation`, and the existing validated `launch_game` path.
+
+### Storage and API
+
+Durable projects use Node's built-in SQLite, with no additional package or hosted database:
+
+- Default database: `.lorecraft/projects.sqlite` (ignored by Git and denied by Vite).
+- Optional process environment: `LORECRAFT_PROJECT_DB=/absolute/path/projects.sqlite` for an isolated database shared by your dev/MCP processes.
+- Versioned migrations in `src/projects/migrations/` run transactionally on first access. Migration 1 creates project/revision tables; migration 2 adds persisted AI context. Existing rows and revisions are retained.
+- Writes use transactions, foreign keys, bounded revision history, and optimistic revision conflict detection. Stale edits return HTTP 409.
+- Context contains the current design summary, persistent instructions, and the last eight bounded conversation turns; full prompt history remains in saved revisions. API keys are never stored with projects.
+- Back up the SQLite database using SQLite's backup tooling, or stop the app before copying the database and any associated WAL files. Browser-local JSON export/import remains available.
+
+Routes (loopback dev/preview server, same-origin writes):
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/projects` | List server project metadata for the gallery |
+| `GET /api/projects/:id` | Read validated project, revision history, and context |
+| `POST /api/projects` | Create/refine with the same pipeline used by MCP |
+| `GET /api/foundations` | Discover reusable mechanics and controls |
+| `POST /api/generate` | Existing stateless generation endpoint, retained for compatibility |
+
+AI projects created in the studio use the durable endpoint. Browser-local generation stays offline-compatible and retains its context in project JSON. `src/studio/assets.ts` holds shared procedural palettes, pixel sprites, backgrounds, animation settings, tiles, and sound definitions. Preview and standalone HTML exports use the same renderer and asset data. No executable game code is accepted from the AI provider.
+
+Repository tests cover foundation behavior, all 30 genre/theme combinations, persistent context, migration upgrades, HTTP validation/conflicts, and MCP creation with no production build. These checks verify simulation invariants and selected deterministic scenarios; they are not a guarantee of every possible level's difficulty or artistic quality.

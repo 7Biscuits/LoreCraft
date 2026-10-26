@@ -1,8 +1,9 @@
 import './styles.css';
-import { BrowserRuntimeBridge } from './bridge/browserBridge';
+import { BrowserRuntimeBridge, isRuntimeBridgeAvailable } from './bridge/browserBridge';
 import { bridgeOperations, dispatchRuntimeOperation } from './bridge/protocol';
 import type { BridgeOperation } from './bridge/protocol';
 import { loadGame } from './games/catalog';
+import { parseProject } from './studio/spec';
 import { defaultGameId } from './games/manifest';
 import type { AuthoredGameHost } from './games/host';
 import { captureConsole, inspectionOperations, recordLog, runtimeLogs } from './runtime/inspection';
@@ -34,7 +35,7 @@ if (parameters.has('stopped')) {
   const dispose = () => { if (disposed) return; disposed = true; clearInterval(timer); try { host?.destroy(); } finally { restoreConsole(); } };
   const bridgeUrl = new URL('/runtime-bridge', location.href); bridgeUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const bridge = new BrowserRuntimeBridge(undefined, {
-    url: bridgeUrl.href,
+    url: bridgeUrl.href, checkAvailability: isRuntimeBridgeAvailable,
     identity: { sessionId: parameters.get('session') ?? 'manual', runtimeId: crypto.randomUUID(), gameId: parameters.get('game') ?? defaultGameId },
     onStatus: (message) => console.info(`[runtime bridge] ${message}`),
     beforeControl: () => host?.destroy(),
@@ -78,10 +79,34 @@ if (parameters.has('stopped')) {
       report(); send('response', result, requestId);
     } catch (error) { send('response', { ok: false, error: { message: error instanceof Error ? error.message : String(error) } }, requestId); }
   });
-  void Promise.all([loadGame(parameters.get('game') ?? defaultGameId), import('./games/host')]).then(async ([game, { AuthoredGameHost }]) => {
+  const loadSelectedGame = async () => {
+    const projectId = parameters.get('aiProject');
+    if (!projectId) return loadGame(parameters.get('game') ?? defaultGameId);
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`);
+    if (!response.ok) throw new Error('Saved project could not be loaded.');
+    const project = parseProject((await response.json()).project);
+    const revision = project.revisions.find((r) => r.id === (parameters.get('aiRevision') ?? project.activeRevisionId));
+    if (!revision) throw new Error('Project revision not found.');
+    const { GeneratedGame } = await import('./studio/generatedGame');
+    return new GeneratedGame(revision.spec, parameters.get('game') ?? `project-${projectId}`);
+  };
+  void Promise.all([loadSelectedGame(), import('./games/host')]).then(async ([game, { AuthoredGameHost }]) => {
     if (disposed) return;
     host = new AuthoredGameHost(game, reportError, embedded ? { width: 960, height: 560 } : undefined);
     const runtime = await host.start();
+    if ('spec' in game) {
+      const keys = new Set<string>();
+      const input = () => { (game as GeneratedGame).input = { x: Number(keys.has('d') || keys.has('arrowright')) - Number(keys.has('a') || keys.has('arrowleft')), y: Number(keys.has('s') || keys.has('arrowdown')) - Number(keys.has('w') || keys.has('arrowup')), action: keys.has(' '), dash: keys.has('shift') }; };
+      window.addEventListener('keydown', (event) => {
+        if (disposed) return;
+        if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) event.preventDefault();
+        keys.add(event.key.toLowerCase()); input();
+        if (!event.repeat && event.key.toLowerCase() === 'p') { if (host!.isPaused) host!.resume(); else host!.pause(); report(); }
+      });
+      window.addEventListener('keyup', (event) => { keys.delete(event.key.toLowerCase()); input(); });
+      window.addEventListener('blur', () => { keys.clear(); input(); });
+    }
+
     Object.assign(runtime, inspectionOperations(host, 'spec' in game ? () => ({ checks: playtest((game as GeneratedGame).spec) }) : undefined));
     // Wait for an actual rendered frame before claiming the embedded game is ready.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));

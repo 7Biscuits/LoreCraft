@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import * as z from 'zod/v4';
 import { GameBridgeClient } from './bridgeClient';
 import type { GameBridgeResult } from './bridgeClient';
+import { creationRequestSchema } from '../projects/creation';
 import { RuntimeLifecycleManager } from '../lifecycle/manager';
 import type { LifecycleResult } from '../lifecycle/manager';
 
@@ -21,6 +22,7 @@ const properties = z.object({
 }).strict().refine((value) => Object.keys(value).length > 0, 'Provide at least one property to update.');
 
 export const toolSchemas = {
+  createGame: creationRequestSchema.safeExtend({ openBrowser: z.boolean().default(true) }),
   createEntity: z.object({
     id: z.string().trim().min(1).max(128),
     type: entityType,
@@ -62,9 +64,21 @@ export const toolSchemas = {
 export function createMcpServer(bridge = new GameBridgeClient(), lifecycle = new RuntimeLifecycleManager()): McpServer {
   const server = new McpServer(
     { name: 'lorecraft-game', version: '0.1.0' },
-    { instructions: 'Before writing a game, call begin_game_creation with its gameId, title, and user prompt. This opens the LoreCraft studio and displays live progress while you author source. Call update_game_creation at meaningful planning/authoring/testing milestones and on errors. Author source in src/games and register it in the literal manifest; list_games reads fresh metadata without an MCP restart. Then call launch_game with the same gameId to validate/build and verify the game in the background and add it to the studio game library. The user can keep playing another game; do not replace their selected preview or open a blank game tab. reload_game validates edits. Runtime tools control the embedded game. Stop owned servers when requested or when ending the MCP session.' },
+    { instructions: 'Prefer create_game for supported reusable game foundations and data-only edits. Pass projectId for persistent context. For custom source mechanics, call begin_game_creation with its gameId, title, and user prompt. This opens the LoreCraft studio and displays live progress while you author source. Call update_game_creation at meaningful planning/authoring/testing milestones and on errors. Author source in src/games and register it in the literal manifest; list_games reads fresh metadata without an MCP restart. Then call launch_game with the same gameId to validate/build and verify the game in the background and add it to the studio game library. The user can keep playing another game; do not replace their selected preview or open a blank game tab. reload_game validates edits. Runtime tools control the embedded game. Stop owned servers when requested or when ending the MCP session.' },
   );
   server.server.onclose = () => { void Promise.all([bridge.close(), lifecycle.stopGame()]); };
+  server.registerTool('create_game', { description: 'Create or edit a durable game from a prompt, validated spec, or configuration patch. Selects reusable platformer/runner/shooter/survival/puzzle mechanics, runs gameplay checks, reuses managed servers, loads the game, and returns project/revision IDs and diagnostics without a production build. Pass projectId to resume editing and expectedRevision for conflict detection.', inputSchema: toolSchemas.createGame },
+    async ({ openBrowser, ...request }) => {
+      const created = await lifecycle.createGame(request, openBrowser);
+      if (!created.ok) return toToolResult(created);
+      const live = await bridge.request('runGameplayTest', {});
+      const parsed = live.ok ? z.object({ checks: z.array(z.object({ name: z.string(), passed: z.boolean(), detail: z.string() })).min(1).max(30) }).safeParse(live.result) : undefined;
+      if (!live.ok || !parsed?.success || parsed.data.checks.some((c) => !c.passed)) {
+        const failure = { ok: false as const, error: { code: 'OPERATION_FAILED' as const, message: !live.ok ? live.error.message : 'The loaded runtime did not pass its gameplay checks.' }, status: created.result };
+        return toToolResult(failure);
+      }
+      return toToolResult({ ok: true, result: { ...created.result, runtimeChecks: parsed.data.checks } });
+    });
   server.registerTool('begin_game_creation', { description: 'Call FIRST before editing game source. Open the LoreCraft website and display agent creation progress. The game ID can be new and need not be registered yet. Does not generate code itself.', inputSchema: toolSchemas.beginCreation },
     async ({ gameId, title, prompt, openBrowser }) => toToolResult(await lifecycle.beginCreation(gameId, title, prompt, openBrowser)));
   server.registerTool('update_game_creation', { description: 'Publish a real authoring/testing milestone or error in the LoreCraft website. Call while creating the game; launch_game performs the actual build and preview loading.', inputSchema: toolSchemas.updateCreation },

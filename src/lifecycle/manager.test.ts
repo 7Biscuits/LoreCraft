@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { projectStore } from '../projects/store';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { BrowserRuntimeBridge } from '../bridge/browserBridge';
@@ -220,4 +224,26 @@ test('creation opens the studio before validation and publishes authenticated, b
     assert.equal((await launching).ok, true);
     assert.equal(f.manager.getActivity()?.stage, 'ready'); assert.ok(f.manager.getActivity()?.runtimeUrl?.includes('embedded=1'));
   } finally { f.disconnect(); await f.manager.stopGame(); }
+});
+
+
+test('unified data creation reuses managed servers, persists edits and never runs production builds', { timeout: 6000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lorecraft-create-'));
+  const f = fixture({ root });
+  try {
+    const result = await f.manager.createGame({ prompt: 'a peaceful forest puzzle' });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const initial = f.manager.getStatus();
+    assert.equal(initial.creation?.foundation, 'ordered-gems');
+    assert.equal(initial.creation?.diagnostics.productionBuild, false);
+    assert.ok(initial.creation?.checks.every((c) => c.passed));
+    assert.equal(f.builds, 0); assert.equal(f.opens, 1);
+    const saved = projectStore(root).get(initial.creation!.projectId);
+    assert.ok(saved.context?.turns.length);
+    const edit = await f.manager.createGame({ prompt: 'Give me five lives', projectId: saved.id, expectedRevision: saved.activeRevisionId, patch: { lives: 5 } });
+    assert.equal(edit.ok, true, JSON.stringify(edit));
+    assert.equal(f.builds, 0); assert.equal(f.closes, 0); assert.equal(f.opens, 1);
+    assert.equal(projectStore(root).get(saved.id).revisions.length, 2);
+    assert.notEqual(f.manager.getStatus().sessionId, initial.sessionId);
+  } finally { f.disconnect(); await f.manager.stopGame(); projectStore(root).close(); rmSync(root, { recursive: true }); }
 });

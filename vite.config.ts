@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
   return {
   plugins: [agentStatusApi(), studioApi(generatorOptionsFromEnv(env))],
   base: './',
-  server: { host: '127.0.0.1', port: 5173, strictPort: true, fs: { deny: ['.env', '.env.*', '**/.git/**', '**/.lorecraft/**', '**/.agents/**', '**/.codex/**', '**/bridge-token', '*.{crt,pem,key,p12,pfx}'] }, proxy: { '/runtime-bridge': runtimeProxy() } },
-  preview: { host: '127.0.0.1', port: 4173, strictPort: true, proxy: { '/runtime-bridge': runtimeProxy() } },
+  server: { host: '127.0.0.1', port: 5173, strictPort: true, fs: { deny: ['.env', '.env.*', '**/.git/**', '**/.lorecraft/**', '**/*.sqlite', '**/*.sqlite-*', '**/.agents/**', '**/.codex/**', '**/bridge-token', '*.{crt,pem,key,p12,pfx}'] }, proxy: { '/runtime-bridge': runtimeProxy(Number(env.BRIDGE_PORT ?? 8787)) } },
+  preview: { host: '127.0.0.1', port: 4173, strictPort: true, proxy: { '/runtime-bridge': runtimeProxy(Number(env.BRIDGE_PORT ?? 8787)) } },
 };
 });
