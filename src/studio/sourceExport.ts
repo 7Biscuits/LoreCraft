@@ -41,24 +41,28 @@ export async function exportSourceHtml(root: string, gameId: string): Promise<{ 
 <body><div id="toolbar"><strong>${title}</strong><span id="status" role="status">Starting game…</span><button id="restart">Restart</button><button id="fullscreen">Fullscreen</button></div><script>${script}</script></body></html>` };
 }
 
-export function sourceExportApi(): Plugin {
-  const configure = (server: { config: ResolvedConfig; middlewares: Connect.Server }) => {
+export function createSourceExportMiddleware(root: string, logError: (message: string) => void = console.error): Connect.NextHandleFunction {
     // Serialize builds so repeated clicks cannot run multiple bundlers at once.
     let busy = false;
-    server.middlewares.use((req, res, next) => {
+    return (req, res, next) => {
       const match = /^\/api\/games\/([a-z0-9-]+)\/export-html$/.exec(req.url?.split('?')[0] ?? '');
       if (!match) return next();
       const fail = (code: number, message: string) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify({ error: message })); };
       if (req.method !== 'GET') return fail(405, 'Use GET to download a game.');
       if (req.headers.origin && ![`http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)) return fail(403, 'Cross-origin requests are not allowed.');
-      try { if (!readGameCatalog(server.config.root).some(g => g.id === match[1])) return fail(404, 'Source game not found.'); }
+      try { if (!readGameCatalog(root).some(g => g.id === match[1])) return fail(404, 'Source game not found.'); }
       catch { return fail(503, 'The game catalog is being updated. Try again shortly.'); }
       if (busy) return fail(409, 'Another game export is in progress. Try again shortly.');
       busy = true;
-      void exportSourceHtml(server.config.root, match[1]!).then(({ html, filename }) => {
+      void exportSourceHtml(root, match[1]!).then(({ html, filename }) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"`, 'Cache-Control': 'no-store' }); res.end(html);
-      }).catch(error => { server.config.logger.error(String(error)); fail(500, 'Could not export this game. Check the server logs and try again.'); }).finally(() => { busy = false; });
-    });
+      }).catch(error => { logError(String(error)); fail(500, 'Could not export this game. Check the server logs and try again.'); }).finally(() => { busy = false; });
+    };
+}
+
+export function sourceExportApi(): Plugin {
+  const configure = (server: { config: ResolvedConfig; middlewares: Connect.Server }) => {
+    server.middlewares.use(createSourceExportMiddleware(server.config.root, message => server.config.logger.error(message)));
   };
   return { name: 'lorecraft-source-export', configureServer: configure, configurePreviewServer: configure };
 }

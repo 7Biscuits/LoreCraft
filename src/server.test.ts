@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import { createHostedServer } from './server';
@@ -13,6 +13,25 @@ const listen = async (server: Server) => {
   return `http://127.0.0.1:${address.port}`;
 };
 const close = (server: Server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+
+test('hosted HTML export requires authentication and downloads a standalone game', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lorecraft-hosted-export-'));
+  symlinkSync(resolve('src'), join(root, 'src'));
+  symlinkSync(resolve('node_modules'), join(root, 'node_modules'));
+  const password = 'fixture-password-for-exports';
+  const headers = { Authorization: `Basic ${Buffer.from(`lorecraft:${password}`).toString('base64')}` };
+  const server = createHostedServer({ root, password });
+  const base = await listen(server);
+  try {
+    const url = `${base}/api/games/simple-pong/export-html`;
+    assert.equal((await fetch(url)).status, 401);
+    assert.equal((await fetch(url, { headers: { ...headers, Origin: 'https://other.example' } })).status, 403);
+    const response = await fetch(url, { headers });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-disposition')!, /simple-pong\.html/);
+    assert.match(await response.text(), /Simple Pong/);
+  } finally { await close(server); projectStore(root).close(); rmSync(root, { recursive: true }); }
+});
 
 test('hosted studio protects private projects, serves only dist, and retains SQLite revisions after restart', async () => {
   const root = mkdtempSync(join(tmpdir(), 'lorecraft-hosted-'));

@@ -9,6 +9,7 @@ import { createStudioMiddleware } from './studio/api.ts';
 import { generatorOptionsFromEnv } from './studio/generator.ts';
 import type { GeneratorOptions } from './studio/generator.ts';
 import { projectStore } from './projects/store.ts';
+import { createSourceExportMiddleware } from './studio/sourceExport.ts';
 
 interface HostedOptions {
   root?: string;
@@ -23,6 +24,7 @@ export function createHostedServer(options: HostedOptions) {
   const root = options.root ?? resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const staticRoot = resolve(root, 'dist');
   const api = createStudioMiddleware(options.generator ?? {}, root, true);
+  const exportGame = createSourceExportMiddleware(root);
   const digest = (value: string) => createHash('sha256').update(value).digest();
   const expected = digest(`Basic ${Buffer.from(`${options.username ?? 'lorecraft'}:${options.password}`).toString('base64')}`);
   const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -47,7 +49,7 @@ export function createHostedServer(options: HostedOptions) {
           if (req.method !== 'GET') return json(405, { error: 'Use GET.' });
           return json(200, path === '/api/games' ? { games: gameCatalog.map(({ id, title }) => ({ id, title })), existingGameIds: gameCatalog.map((g) => g.id) } : { connected: false, activity: null });
         }
-        return api(req, res, () => json(404, { error: 'Unknown API route.' }));
+        return exportGame(req, res, () => api(req, res, () => json(404, { error: 'Unknown API route.' })));
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') return json(405, { error: 'Use GET or HEAD.' });
       const decoded = decodeURIComponent(path);
