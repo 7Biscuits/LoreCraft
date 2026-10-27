@@ -1,5 +1,8 @@
 /** Node reads metadata only; LittleJS game modules are loaded by the browser. */
 export const gameCatalog: readonly { id: string; title: string; entry: string; exportName: string }[] = [
+  { id: 'physics-frontier', title: 'Physics Frontier', entry: './physics-frontier/index.ts', exportName: 'physicsFrontierGame' },
+  { id: 'sword-duel', title: 'Sword Duel', entry: './sword-duel/index.ts', exportName: 'swordDuelGame' },
+  { id: 'simple-pong', title: 'Simple Pong', entry: './simple-pong/index.ts', exportName: 'simplePongGame' },
   { id: 'ken-vs-ryu', title: 'Ken vs. Ryu — Arcade Duel', entry: './ken-vs-ryu/index.ts', exportName: 'arcadeDuelGame' },
   { id: 'starter-town', title: 'Starter Town', entry: './starter-town/index.ts', exportName: 'starterTownGame' },
   { id: 'endless-racer', title: 'Endless Racer', entry: './endless-racer/index.ts', exportName: 'endlessRacerGame' },
