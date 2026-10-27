@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: lorecraft
+    runtime: node
+    region: ohio
+    plan: 0.5c-512mb
+    numInstances: 1
+    buildCommand: pnpm install --frozen-lockfile --prod=false && pnpm build
+    startCommand: pnpm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      - key: LORECRAFT_PROJECT_DB
+        value: /var/data/projects.sqlite
+      - key: LORECRAFT_STUDIO_USERNAME
+        value: lorecraft
+      - key: LORECRAFT_STUDIO_PASSWORD
+        generateValue: true
+    disk:
+      name: lorecraft-projects
+      mountPath: /var/data
+      sizeGB: 1
