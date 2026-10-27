@@ -12,7 +12,7 @@ type Listener = (event: any) => void;
 
 // Exercise the studio's real event handlers and storage without starting a game
 // engine. Only the browser surface is stubbed; project/generation logic is real.
-async function studioFixture(t: TestContext, options: { empty?: boolean } = {}) {
+async function studioFixture(t: TestContext, options: { empty?: boolean; serverPersistence?: boolean } = {}) {
   const elements = new Map<string, ReturnType<typeof makeElement>>();
   function makeElement() {
     const attributes = new Set<string>();
@@ -51,7 +51,8 @@ async function studioFixture(t: TestContext, options: { empty?: boolean } = {}) 
   t.mock.method(globalThis, 'setTimeout', (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
     const timer = nativeTimeout(callback, localDemoStages.some((stage) => stage.duration === delay) ? 5 : delay, ...args); timers.add(timer); return timer;
   });
-  t.mock.method(globalThis, 'fetch', async () => new Response('', { status: 503 }));
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request) => String(url) === '/api/status' && options.serverPersistence
+    ? Response.json({ aiAvailable: false, serverPersistence: true }) : new Response('', { status: 503 }));
   t.after(() => {
     windowListeners.get('pagehide')?.({});
     for (const timer of timers) clearTimeout(timer);
@@ -102,6 +103,26 @@ async function studioFixture(t: TestContext, options: { empty?: boolean } = {}) 
   };
   return { element, click, generate, reportState, reload, body: globals.document.body };
 }
+
+test('hosted local generation saves and refines server projects without an AI provider', async (t) => {
+  const studio = await studioFixture(t, { empty: true, serverPersistence: true });
+  const writes: Record<string, any>[] = [];
+  let remote: ReturnType<typeof newProject> | undefined;
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url) !== '/api/projects' || init?.method !== 'POST') return new Response('', { status: 503 });
+    const body = JSON.parse(String(init.body)); writes.push(body);
+    const revision = { id: crypto.randomUUID(), prompt: body.prompt, spec: body.spec, source: 'local' as const, createdAt: new Date().toISOString(), checks: [] };
+    remote = body.projectId ? { ...remote!, revisions: [...remote!.revisions, revision], activeRevisionId: revision.id } : { ...newProject(revision), storage: 'server' };
+    return Response.json({ project: remote });
+  });
+  await studio.generate('a peaceful forest adventure');
+  const saved = readProjects()[0]!;
+  assert.equal(saved.storage, 'server'); assert.equal(writes.length, 1);
+  await studio.generate('give it six lives');
+  assert.equal(writes[1]!.projectId, saved.id);
+  assert.equal(writes[1]!.expectedRevision, saved.activeRevisionId);
+  assert.equal(readProjects()[0]!.revisions.length, 2);
+});
 
 test('background refinements survive saves and accumulate without replacing the playing revision', async (t) => {
   const studio = await studioFixture(t);

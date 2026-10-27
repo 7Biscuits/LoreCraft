@@ -158,6 +158,25 @@ Managed launch allows its selected `http://127.0.0.1:<port>` Origin. Its build d
 
 ## Verification and production build
 
+### Render hosting with persistent projects
+
+`render.yaml` describes one paid Node web service with a 1 GB persistent disk at `/var/data`.
+The hosted entry point, `pnpm start`, serves only the compiled `dist/` files and the project/generation API on `0.0.0.0:$PORT`.
+Build with `pnpm install --frozen-lockfile --prod=false && pnpm build` and use Node 24.
+
+Set `LORECRAFT_PROJECT_DB=/var/data/projects.sqlite` and a random `LORECRAFT_STUDIO_PASSWORD` of at least 16 characters.
+The username defaults to `lorecraft` (override with `LORECRAFT_STUDIO_USERNAME`). The browser asks for these credentials before opening the studio; `/healthz` remains available for Render readiness checks.
+Keep the password in Render environment variables, never in Git. The Blueprint generates one automatically when first applied.
+
+Hosted local generation and AI generation save design projects and revisions to SQLite on the disk. Browser storage also caches them for the preview.
+Open **Game gallery** to find server projects from another browser or after clearing browser data.
+Prepared Mario/Maze library selections and runtime checkpoints remain browser-local; source game code ships from the Git repository.
+The disk preserves SQLite through restarts and redeploys, but is not a backup. Export important project JSON files and use SQLite-aware database backups.
+
+This is a password-protected shared creator workspace, without separate user accounts. Everyone with its password can access its server projects.
+The hosted server does not expose the local MCP relay or source-authoring lifecycle. Custom source games must be committed and pushed, then deployed.
+AI mode is optional; configure its provider credentials separately in Render environment variables. Render hosting credits do not pay for AI provider usage.
+
 ```sh
 pnpm test
 pnpm typecheck

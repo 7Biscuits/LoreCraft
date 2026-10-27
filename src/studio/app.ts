@@ -54,6 +54,7 @@ export async function startStudio(): Promise<void> {
   let revision = project.revisions.find((r) => r.id === project.activeRevisionId)!;
   let tab = 'overview', generating = false, ready = false, paused = true, muted = true, aiAvailable = false;
   let generationMode: 'local' | 'ai' = 'local';
+  let serverPersistence = false;
   let selectedEntity = 'player-1';
   let snapshot: WorldState | undefined;
   let entities: { id: string; type: string; position: { x: number; y: number }; size: { x: number; y: number }; properties: { speed: number } }[] = [];
@@ -125,7 +126,7 @@ export async function startStudio(): Promise<void> {
   const agentFrame = $<HTMLIFrameElement>('#agent-frame');
   const toast = (message: string) => { $('#toast').textContent = message; $('#toast').classList.add('visible'); setTimeout(() => $('#toast').classList.remove('visible'), 4500); };
   const persist = () => {
-    try { saveProject(project); library = readProjects(); $('#save-status').innerHTML = '<i></i> Saved locally'; renderLibrary(); }
+    try { saveProject(project); library = readProjects(); $('#save-status').innerHTML = project.storage === 'server' ? '<i></i> Saved on server' : '<i></i> Saved locally'; renderLibrary(); }
     catch (error) { $('#save-status').textContent = 'Not saved'; toast(error instanceof Error ? error.message : 'Could not save. Export the project to keep your work.'); }
   };
   const request = (operation: string, args: Record<string, unknown> = {}): Promise<any> => {
@@ -271,8 +272,9 @@ export async function startStudio(): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 100));
         const spec = compilePrompt(prompt, baseSpec); $('#progress-1').classList.add('done');
         await new Promise((resolve) => setTimeout(resolve, 100)); result = { spec, source: 'local', checks: playtest(spec) };
-        if (destination.storage === 'server') {
-          const response = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000), body: JSON.stringify({ prompt, spec, projectId: destination.id, expectedRevision: destination.activeRevisionId }) });
+        if (destination.storage === 'server' || serverPersistence) {
+          const target = destination.storage === 'server' && !createNewProject ? { projectId: destination.id, expectedRevision: destination.activeRevisionId } : {};
+          const response = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000), body: JSON.stringify({ prompt, spec, ...target }) });
           const payload = await response.json(); if (!response.ok) throw new Error(payload.error ?? 'Could not save the server revision.'); result.project = parseProject(payload.project);
         }
       } else {
@@ -555,5 +557,5 @@ export async function startStudio(): Promise<void> {
   else openRemainingGame();
   void pollAgentActivity();
   if (storageError) toast(storageError);
-  try { const response = await fetch('/api/status', { signal: AbortSignal.timeout(3000) }); if (response.ok) { const status = await response.json(); aiAvailable = Boolean(status.aiAvailable); if (aiAvailable) { const option = $<HTMLSelectElement>('#generation-mode').options[1]!; option.disabled = false; option.textContent = 'AI generation'; } } } catch { /* Static/offline mode intentionally keeps local generation available. */ }
+  try { const response = await fetch('/api/status', { signal: AbortSignal.timeout(3000) }); if (response.ok) { const status = await response.json(); serverPersistence = status.serverPersistence === true; aiAvailable = Boolean(status.aiAvailable); if (aiAvailable) { const option = $<HTMLSelectElement>('#generation-mode').options[1]!; option.disabled = false; option.textContent = 'AI generation'; } } } catch { /* Static/offline mode intentionally keeps local generation available. */ }
 }
